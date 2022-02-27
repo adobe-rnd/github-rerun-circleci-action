@@ -31036,7 +31036,7 @@ const github = __nccwpck_require__(5438);
 const { fetch } = __nccwpck_require__(8614);
 
 async function run() {
-  console.log(JSON.stringify(github.context, null, 2));
+  // console.log(JSON.stringify(github.context, null, 2));
   const { payload, eventName, actor } = github.context;
   const action = payload.action;
   if (action !== 'completed' || eventName !== 'check_run') {
@@ -31050,10 +31050,10 @@ async function run() {
     return;
   }
 
-  // if (actor !== 'renovate[bot]') { // todo: to be configured
-  //   console.log(`ignoring check run with actor: ${actor}`);
-  //   return;
-  // }
+  if (actor !== 'renovate[bot]') { // todo: to be configured
+    console.log(`ignoring check run with actor: ${actor}`);
+    return;
+  }
 
   const details_url = payload.check_run.details_url || '';
   if (!details_url.startsWith('https://circleci.com/workflow-run/')) {
