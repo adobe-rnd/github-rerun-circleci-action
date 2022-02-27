@@ -1,12 +1,12 @@
-name: 'Trigger CI'
-description: 'Creates an empty commit on behalf of another user.'
-inputs:
-  user:
-    description: 'user for which to impersonate'
-    required: true
-  repo-token:
-    description: 'github token for creating commit'
-    required: true
+name: 'Rerun CircleCI'
+description: 'Reruns a failed CircleCi Job.'
+#inputs:
+#  user:
+#    description: 'user for which to impersonate'
+#    required: true
+#  repo-token:
+#    description: 'github token for creating commit'
+#    required: true
 runs:
-  using: 'node14'
+  using: 'node16'
   main: 'dist/index.js'
