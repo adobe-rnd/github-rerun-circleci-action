@@ -31037,7 +31037,7 @@ const { fetch } = __nccwpck_require__(8614);
 
 async function run() {
   console.log(JSON.stringify(github.context, null, 2));
-  const { payload, eventName } = github.context;
+  const { payload, eventName, actor } = github.context;
   const action = payload.action;
   if (action !== 'completed' || eventName !== 'check_run') {
     core.warning(`Invalid configuration. This action should only be triggered on "check_run:completed" events (was ${eventName}:${action})`);
@@ -31050,6 +31050,17 @@ async function run() {
     return;
   }
 
+  if (actor !== 'renovate[bot]') { // todo: to be configured
+    console.log(`ignoring check run with actor: ${actor}`);
+    return;
+  }
+
+  const details_url = payload.check_run.details_url || '';
+  if (!details_url.startsWith('https://circleci.com/workflow-run/')) {
+    console.log(`ignoring non circleci check run: ${details_url}`);
+    return;
+  }
+
   const circleToken =  core.getInput('circleci-token', {required: true});
 
   const { 'workflow-id': workflowId } = JSON.parse(payload.check_run.external_id);
@@ -31059,19 +31070,47 @@ async function run() {
     return;
   }
 
-  const url = `https://circleci.com/api/v2/workflow/${workflowId}/job`;
-
-  console.log('requesting', url);
-  const resp = await fetch(url, {
+  let url = `https://circleci.com/api/v2/workflow/${workflowId}/job`;
+  console.log('GET', url);
+  let resp = await fetch(url, {
     headers: {
       'circle-token': circleToken,
     }
   });
-  if (resp.ok) {
-    console.log(await resp.json());
-  } else {
+  if (!resp.ok) {
     core.warning(`Unable to fetch workflow job: ${resp.status} ${await resp.text()}`);
+    return;
   }
+
+  let body = await resp.json();
+  console.log(body);
+
+  // check if any of the status is `unauthorized`
+  const failed = body.items.find((item) => item.status === 'unauthorized');
+  if (!failed) {
+    core.info('non of the circleci jobs failed due to unauthorized status. ignoring.');
+    return;
+  }
+
+  core.info(`circleci job ${item.name} has status ${item.status}. try to rerun.`);
+
+  url = `https://circleci.com/api/v2/workflow/${workflowId}/rerun`;
+  console.log('POST', url);
+  resp = await fetch(url, {
+    headers: {
+      'circle-token': circleToken,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      from_failed: true,
+    }),
+  });
+  if (!resp.ok) {
+    core.warning(`Unable to rerun workflow job: ${resp.status} ${await resp.text()}`);
+  }
+  body = await resp.json();
+  console.log(body);
+
 }
 
 run().catch((error) => {
