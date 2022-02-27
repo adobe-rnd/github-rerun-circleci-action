@@ -28,12 +28,15 @@ async function run() {
     return;
   }
 
-  const circleToken = new github.GitHub(
-    core.getInput('circleci-token', {required: true})
-  );
-  console.log('token length', circleToken.length)
+  const circleToken =  core.getInput('circleci-token', {required: true});
 
   const { 'workflow-id': workflowId } = JSON.parse(payload.check_run.external_id);
+
+  if (!workflowId) {
+    core.warning(`Invalid event. check_run does not include information about workflow-id`);
+    return;
+  }
+
   const url = `https://circleci.com/api/v2/workflow/${workflowId}/job`;
 
   console.log('requesting', url);
