@@ -31092,11 +31092,12 @@ async function run() {
     return;
   }
 
-  core.info(`circleci job ${failed.name} has status ${failed.status}. try to rerun.`);
+  core.info(`circleci job '${failed.name}' has status '${failed.status}'. try to rerun.`);
 
   url = `https://circleci.com/api/v2/workflow/${workflowId}/rerun`;
   console.log('POST', url);
   resp = await fetch(url, {
+    method: 'POST',
     headers: {
       'circle-token': circleToken,
       'content-type': 'application/json',
