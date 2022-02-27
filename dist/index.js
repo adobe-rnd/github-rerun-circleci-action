@@ -31050,10 +31050,10 @@ async function run() {
     return;
   }
 
-  if (actor !== 'renovate[bot]') { // todo: to be configured
-    console.log(`ignoring check run with actor: ${actor}`);
-    return;
-  }
+  // if (actor !== 'renovate[bot]') { // todo: to be configured
+  //   console.log(`ignoring check run with actor: ${actor}`);
+  //   return;
+  // }
 
   const details_url = payload.check_run.details_url || '';
   if (!details_url.startsWith('https://circleci.com/workflow-run/')) {
