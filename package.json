@@ -26,6 +26,6 @@
     "@adobe/helix-fetch": "^3.0.5"
   },
   "devDependencies": {
-    "@zeit/ncc": "^0.21.1"
+    "@vercel/ncc": "^0.33.3"
   }
 }

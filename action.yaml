@@ -8,5 +8,5 @@ inputs:
     description: 'github token for creating commit'
     required: true
 runs:
-  using: 'node12'
+  using: 'node14'
   main: 'dist/index.js'
