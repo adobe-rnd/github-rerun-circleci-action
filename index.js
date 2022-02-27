@@ -13,7 +13,15 @@ const core = require('@actions/core');
 const github = require('@actions/github');
 
 async function run() {
-  console.log(github.context);
+  console.log('----- 1 -------');
+  console.log(process.env.GITHUB_EVENT_NAME);
+  console.log(JSON.stringify(github.context, null, 2));
+  const { payload } = github.context;
+  const conclusion = payload?.check_run?.conclusion;
+  if (conclusion !== 'failure') {
+    console.log(`ignoring check run with conclusion: ${conclusion}`);
+    return;
+  }
   // const user = core.getInput('user');
   // if (!user) {
   //   throw Error('configuration is missing input for: user');
