@@ -1150,6 +1150,3329 @@ exports.checkBypass = checkBypass;
 
 /***/ }),
 
+/***/ 5244:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+/*
+ * Copyright 2021 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+
+
+const { randomBytes } = __nccwpck_require__(6113);
+const { Readable } = __nccwpck_require__(2781);
+
+// Misc. helper functions for dealing with spec-compliant FormData objects
+
+const isBlob = (obj) => (typeof obj === 'object'
+  && [
+    'arrayBuffer',
+    'stream',
+    'text',
+    'slice',
+    'constructor',
+  ]
+    .map((nm) => typeof obj[nm])
+    .filter((type) => type !== 'function')
+    .length === 0
+  && typeof obj.type === 'string'
+  && typeof obj.size === 'number'
+  && /^(Blob|File)$/.test(obj[Symbol.toStringTag]));
+
+const isFormData = (obj) => (obj != null // neither null nor undefined
+  && typeof obj === 'object'
+  && [
+    'append',
+    'delete',
+    'get',
+    'getAll',
+    'has',
+    'set',
+    'keys',
+    'values',
+    'entries',
+    'constructor',
+  ]
+    .map((nm) => typeof obj[nm])
+    .filter((type) => type !== 'function')
+    .length === 0
+  && obj[Symbol.toStringTag] === 'FormData');
+
+const getFooter = (boundary) => `--${boundary}--\r\n\r\n`;
+
+const getHeader = (boundary, name, field) => {
+  let header = '';
+
+  header += `--${boundary}\r\n`;
+  header += `Content-Disposition: form-data; name="${name}"`;
+
+  if (isBlob(field)) {
+    header += `; filename="${field.name}"\r\n`;
+    header += `Content-Type: ${field.type || 'application/octet-stream'}`;
+  }
+
+  return `${header}\r\n\r\n`;
+};
+
+/**
+ * @param {FormData} form
+ * @param {string} boundary
+ *
+ * @returns {string}
+ */
+async function* formDataIterator(form, boundary) {
+  for (const [name, value] of form) {
+    yield getHeader(boundary, name, value);
+
+    if (isBlob(value)) {
+      yield* value.stream();
+    } else {
+      yield value;
+    }
+
+    yield '\r\n';
+  }
+
+  yield getFooter(boundary);
+}
+
+/**
+ * @param {FormData} form
+ * @param {string} boundary
+ *
+ * @returns {number}
+ */
+const getFormDataLength = (form, boundary) => {
+  let length = 0;
+
+  for (const [name, value] of form) {
+    length += Buffer.byteLength(getHeader(boundary, name, value));
+    length += isBlob(value) ? value.size : Buffer.byteLength(String(value));
+    length += Buffer.byteLength('\r\n');
+  }
+  length += Buffer.byteLength(getFooter(boundary));
+
+  return length;
+};
+
+class FormDataSerializer {
+  constructor(formData) {
+    this.fd = formData;
+    this.boundary = randomBytes(8).toString('hex');
+  }
+
+  length() {
+    if (typeof this._length === 'undefined') {
+      this._length = getFormDataLength(this.fd, this.boundary);
+    }
+    return this._length;
+  }
+
+  contentType() {
+    return `multipart/form-data; boundary=${this.boundary}`;
+  }
+
+  stream() {
+    return Readable.from(formDataIterator(this.fd, this.boundary));
+  }
+}
+
+module.exports = {
+  isFormData, FormDataSerializer,
+};
+
+
+/***/ }),
+
+/***/ 1713:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+
+
+/* eslint-disable guard-for-in */
+
+const { constants: { MAX_LENGTH: maxBufferLength } } = __nccwpck_require__(4300);
+const { pipeline, PassThrough } = __nccwpck_require__(2781);
+const { promisify } = __nccwpck_require__(3837);
+const {
+  createGunzip,
+  createInflate,
+  createBrotliDecompress,
+  constants: {
+    Z_SYNC_FLUSH,
+  },
+} = __nccwpck_require__(9796);
+
+const debug = __nccwpck_require__(8237)('helix-fetch:utils');
+
+const asyncPipeline = promisify(pipeline);
+
+const shouldDecode = (statusCode, headers) => {
+  if (statusCode === 204 || statusCode === 304) {
+    return false;
+  }
+  if (+headers['content-length'] === 0) {
+    return false;
+  }
+  return /^\s*(?:(x-)?deflate|(x-)?gzip|br)\s*$/.test(headers['content-encoding']);
+};
+
+const decodeStream = (statusCode, headers, readableStream, onError) => {
+  if (!shouldDecode(statusCode, headers)) {
+    return readableStream;
+  }
+
+  const cb = (err) => {
+    if (err) {
+      debug(`encountered error while decoding stream: ${err}`);
+      onError(err);
+    }
+  };
+
+  switch (headers['content-encoding'].trim()) {
+    case 'gzip':
+    case 'x-gzip':
+      // use Z_SYNC_FLUSH like cURL does
+      return pipeline(
+        readableStream,
+        createGunzip({ flush: Z_SYNC_FLUSH, finishFlush: Z_SYNC_FLUSH }),
+        cb,
+      );
+
+    case 'deflate':
+    case 'x-deflate':
+      return pipeline(readableStream, createInflate(), cb);
+
+    case 'br':
+      return pipeline(readableStream, createBrotliDecompress(), cb);
+
+    /* istanbul ignore next */
+    default:
+      // dead branch since it's covered by shouldDecode already;
+      // only here to make eslint stop complaining
+      return readableStream;
+  }
+};
+
+const isPlainObject = (val) => {
+  if (!val || typeof val !== 'object') {
+    return false;
+  }
+  if (Object.prototype.toString.call(val) !== '[object Object]') {
+    return false;
+  }
+  if (Object.getPrototypeOf(val) === null) {
+    return true;
+  }
+  let proto = val;
+  while (Object.getPrototypeOf(proto) !== null) {
+    proto = Object.getPrototypeOf(proto);
+  }
+  return Object.getPrototypeOf(val) === proto;
+};
+
+const calcSize = (obj, processed) => {
+  if (Buffer.isBuffer(obj)) {
+    return obj.length;
+  }
+
+  switch (typeof obj) {
+    case 'string':
+      return obj.length * 2;
+    case 'boolean':
+      return 4;
+    case 'number':
+      return 8;
+    case 'symbol':
+      return Symbol.keyFor(obj)
+        ? Symbol.keyFor(obj).length * 2 // global symbol '<string>'
+        : (obj.toString().length - 8) * 2; // local symbol 'Symbol(<string>)'
+    case 'object':
+      if (Array.isArray(obj)) {
+        // eslint-disable-next-line no-use-before-define
+        return calcArraySize(obj, processed);
+      } else {
+        // eslint-disable-next-line no-use-before-define
+        return calcObjectSize(obj, processed);
+      }
+    default:
+      return 0;
+  }
+};
+
+const calcArraySize = (arr, processed) => {
+  processed.add(arr);
+
+  return arr.map((entry) => {
+    if (processed.has(entry)) {
+      // skip circular references
+      return 0;
+    }
+    return calcSize(entry, processed);
+  }).reduce((acc, curr) => acc + curr, 0);
+};
+
+const calcObjectSize = (obj, processed) => {
+  if (obj == null) {
+    return 0;
+  }
+
+  processed.add(obj);
+
+  let bytes = 0;
+  const names = [];
+
+  // eslint-disable-next-line no-restricted-syntax
+  for (const key in obj) {
+    names.push(key);
+  }
+
+  names.push(...Object.getOwnPropertySymbols(obj));
+
+  names.forEach((nm) => {
+    // key
+    bytes += calcSize(nm, processed);
+    // value
+    if (typeof obj[nm] === 'object' && obj[nm] !== null) {
+      if (processed.has(obj[nm])) {
+        // skip circular references
+        return;
+      }
+      processed.add(obj[nm]);
+    }
+    bytes += calcSize(obj[nm], processed);
+  });
+
+  return bytes;
+};
+
+const sizeof = (obj) => calcSize(obj, new WeakSet());
+
+const streamToBuffer = async (stream) => {
+  const passThroughStream = new PassThrough();
+
+  let length = 0;
+  const chunks = [];
+
+  passThroughStream.on('data', (chunk) => {
+    /* istanbul ignore next */
+    if ((length + chunk.length) > maxBufferLength) {
+      throw new Error('Buffer.constants.MAX_SIZE exceeded');
+    }
+    chunks.push(chunk);
+    length += chunk.length;
+  });
+
+  await asyncPipeline(stream, passThroughStream);
+  return Buffer.concat(chunks, length);
+};
+
+module.exports = {
+  decodeStream, isPlainObject, sizeof, streamToBuffer,
+};
+
+
+/***/ }),
+
+/***/ 3575:
+/***/ ((module) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+
+
+/**
+ * Error thrown if a request is aborted via an AbortSignal.
+ */
+class RequestAbortedError extends Error {
+  get name() {
+    return this.constructor.name;
+  }
+
+  get [Symbol.toStringTag]() {
+    return this.constructor.name;
+  }
+}
+
+module.exports = { RequestAbortedError };
+
+
+/***/ }),
+
+/***/ 6379:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+
+
+const http = __nccwpck_require__(3685);
+const https = __nccwpck_require__(5687);
+const { Readable } = __nccwpck_require__(2781);
+
+const debug = __nccwpck_require__(8237)('helix-fetch:h1');
+
+const { RequestAbortedError } = __nccwpck_require__(3575);
+const { decodeStream } = __nccwpck_require__(1713);
+
+const getAgent = (ctx, protocol) => {
+  // getAgent is synchronous, no need for lock/mutex
+  const { h1, options: { h1: opts, rejectUnauthorized } } = ctx;
+
+  if (protocol === 'https:') {
+    // secure http
+    if (h1.httpsAgent) {
+      return h1.httpsAgent;
+    }
+    // use agent if either h1 options or rejectUnauthorized context option was specified
+    if (opts || typeof rejectUnauthorized === 'boolean') {
+      h1.httpsAgent = new https.Agent(typeof rejectUnauthorized === 'boolean' ? { ...(opts || {}), rejectUnauthorized } : opts);
+      return h1.httpsAgent;
+    }
+    // use default (global) agent
+    return undefined;
+  } else {
+    // plain http
+    if (h1.httpAgent) {
+      return h1.httpAgent;
+    }
+    if (opts) {
+      h1.httpAgent = new http.Agent(opts);
+      return h1.httpAgent;
+    }
+    // use default (global) agent
+    return undefined;
+  }
+};
+
+const setupContext = (ctx) => {
+  // const { options: { h1: opts } } = ctx;
+  ctx.h1 = {};
+  // custom agents will be lazily instantiated
+};
+
+const resetContext = async ({ h1 }) => {
+  if (h1.httpAgent) {
+    debug('resetContext: destroying httpAgent');
+    h1.httpAgent.destroy();
+    // eslint-disable-next-line no-param-reassign
+    delete h1.httpAgent;
+  }
+  if (h1.httpsAgent) {
+    debug('resetContext: destroying httpsAgent');
+    h1.httpsAgent.destroy();
+    // eslint-disable-next-line no-param-reassign
+    delete h1.httpsAgent;
+  }
+};
+
+const createResponse = (incomingMessage, onError) => {
+  const {
+    statusCode,
+    statusMessage,
+    httpVersion,
+    httpVersionMajor,
+    httpVersionMinor,
+    headers, // header names are always lower-cased
+  } = incomingMessage;
+  return {
+    statusCode,
+    statusText: statusMessage,
+    httpVersion,
+    httpVersionMajor,
+    httpVersionMinor,
+    headers,
+    readable: decodeStream(statusCode, headers, incomingMessage, onError),
+  };
+};
+
+const h1Request = async (ctx, url, options) => {
+  const { request } = url.protocol === 'https:' ? https : http;
+  const agent = getAgent(ctx, url.protocol);
+  const opts = { ...options, agent };
+  const { socket, body } = opts;
+  if (socket) {
+    // we've got a socket from initial protocol negotiation via ALPN
+    delete opts.socket;
+    if (!socket.assigned) {
+      socket.assigned = true;
+      // reuse socket for actual request
+      if (agent) {
+        // if there's an agent we need to override the agent's createConnection
+        opts.agent = new Proxy(agent, {
+          get: (target, property) => {
+            if (property === 'createConnection' && !socket.inUse) {
+              return (_connectOptions, cb) => {
+                debug(`agent reusing socket #${socket.id} (${socket.servername})`);
+                socket.inUse = true;
+                cb(null, socket);
+              };
+            } else {
+              return target[property];
+            }
+          },
+        });
+      } else {
+        // no agent, provide createConnection function in options
+        opts.createConnection = (_connectOptions, cb) => {
+          debug(`reusing socket #${socket.id} (${socket.servername})`);
+          socket.inUse = true;
+          cb(null, socket);
+        };
+      }
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    debug(`${opts.method} ${url.href}`);
+    let req;
+
+    // intercept abort signal in order to cancel request
+    const { signal } = opts;
+    const onAbortSignal = () => {
+      // deregister from signal
+      signal.removeEventListener('abort', onAbortSignal);
+      /* istanbul ignore next */
+      if (socket && !socket.inUse) {
+        // we have no use for the passed socket
+        debug(`discarding redundant socket used for ALPN: #${socket.id} ${socket.servername}`);
+        socket.destroy();
+      }
+      reject(new RequestAbortedError());
+      /* istanbul ignore else */
+      if (req) {
+        req.abort();
+      }
+    };
+    if (signal) {
+      if (signal.aborted) {
+        reject(new RequestAbortedError());
+        return;
+      }
+      signal.addEventListener('abort', onAbortSignal);
+    }
+
+    req = request(url, opts);
+    req.once('response', (res) => {
+      if (signal) {
+        signal.removeEventListener('abort', onAbortSignal);
+      }
+      /* istanbul ignore next */
+      if (socket && !socket.inUse) {
+        // we have no use for the passed socket
+        debug(`discarding redundant socket used for ALPN: #${socket.id} ${socket.servername}`);
+        socket.destroy();
+      }
+      resolve(createResponse(res, reject));
+    });
+    req.once('error', (err) => {
+      // error occured during the request
+      /* istanbul ignore else */
+      if (signal) {
+        signal.removeEventListener('abort', onAbortSignal);
+      }
+      /* istanbul ignore next */
+      if (socket && !socket.inUse) {
+        // we have no use for the passed socket
+        debug(`discarding redundant socket used for ALPN: #${socket.id} ${socket.servername}`);
+        socket.destroy();
+      }
+      /* istanbul ignore next */
+      if (!req.aborted) {
+        debug(`${opts.method} ${url.href} failed with: ${err.message}`);
+        // TODO: better call req.destroy(err) instead of req.abort() ?
+        req.abort();
+        reject(err);
+      }
+    });
+    // send request body?
+    if (body instanceof Readable) {
+      body.pipe(req);
+    } else {
+      if (body) {
+        req.write(body);
+      }
+      req.end();
+    }
+  });
+};
+
+module.exports = { request: h1Request, setupContext, resetContext };
+
+
+/***/ }),
+
+/***/ 2308:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+
+
+const {
+  // ClientHttp2Session,
+  // ClientHttp2Stream,
+  connect,
+  constants,
+  // IncomingHttpHeaders,
+  // SecureClientSessionOptions,
+} = __nccwpck_require__(5158);
+const { Readable } = __nccwpck_require__(2781);
+
+const debug = __nccwpck_require__(8237)('helix-fetch:h2');
+
+const { RequestAbortedError } = __nccwpck_require__(3575);
+const { decodeStream } = __nccwpck_require__(1713);
+
+const { NGHTTP2_CANCEL } = constants;
+
+const SESSION_IDLE_TIMEOUT = 5 * 60 * 1000; // 5m
+const PUSHED_STREAM_IDLE_TIMEOUT = 5000; // 5s
+
+const setupContext = (ctx) => {
+  ctx.h2 = { sessionCache: {} };
+};
+
+// eslint-disable-next-line arrow-body-style
+const resetContext = async ({ h2 }) => {
+  return Promise.all(Object.values(h2.sessionCache).map(
+    (session) => new Promise((resolve) => {
+      session.on('close', resolve);
+      debug(`resetContext: destroying session (socket #${session.socket && session.socket.id}, ${session.socket && session.socket.servername})`);
+      session.destroy();
+    }),
+  ));
+};
+
+const createResponse = (
+  headers,
+  clientHttp2Stream,
+  /* istanbul ignore next */ onError = () => {},
+) => {
+  const hdrs = { ...headers };
+  const statusCode = hdrs[':status'];
+  delete hdrs[':status'];
+
+  return {
+    statusCode,
+    statusText: '',
+    httpVersion: '2.0',
+    httpVersionMajor: 2,
+    httpVersionMinor: 0,
+    headers: hdrs, // header names are always lower-cased
+    readable: decodeStream(statusCode, headers, clientHttp2Stream, onError),
+  };
+};
+
+const handlePush = (ctx, origin, pushedStream, requestHeaders, flags) => {
+  const {
+    options: {
+      h2: {
+        pushPromiseHandler,
+        pushHandler,
+        pushedStreamIdleTimeout = PUSHED_STREAM_IDLE_TIMEOUT,
+      },
+    },
+  } = ctx;
+
+  const path = requestHeaders[':path'];
+  const url = `${origin}${path}`;
+
+  debug(`received PUSH_PROMISE: ${url}, stream #${pushedStream.id}, headers: ${JSON.stringify(requestHeaders)}, flags: ${flags}`);
+  if (pushPromiseHandler) {
+    const rejectPush = () => {
+      pushedStream.close(NGHTTP2_CANCEL);
+    };
+    // give handler opportunity to reject the push
+    pushPromiseHandler(url, requestHeaders, rejectPush);
+  }
+  pushedStream.on('push', (responseHeaders, flgs) => {
+    // received headers for the pushed streamn
+    // similar to 'response' event on ClientHttp2Stream
+    debug(`received push headers for ${origin}${path}, stream #${pushedStream.id}, headers: ${JSON.stringify(responseHeaders)}, flags: ${flgs}`);
+
+    // set timeout to automatically discard pushed streams that aren't consumed for some time
+    pushedStream.setTimeout(pushedStreamIdleTimeout, /* istanbul ignore next */ () => {
+      debug(`closing pushed stream #${pushedStream.id} after ${pushedStreamIdleTimeout} ms of inactivity`);
+      pushedStream.close(NGHTTP2_CANCEL);
+    });
+
+    /* istanbul ignore else */
+    if (pushHandler) {
+      pushHandler(url, requestHeaders, createResponse(responseHeaders, pushedStream));
+    }
+  });
+  // log stream errors
+  pushedStream.on('aborted', /* istanbul ignore next */ () => {
+    debug(`pushed stream #${pushedStream.id} aborted`);
+  });
+  pushedStream.on('error', /* istanbul ignore next */ (err) => {
+    debug(`pushed stream #${pushedStream.id} encountered error: ${err}`);
+  });
+  pushedStream.on('frameError', /* istanbul ignore next */ (type, code, id) => {
+    debug(`pushed stream #${pushedStream.id} encountered frameError: type: ${type}, code: ${code}, id: ${id}`);
+  });
+};
+
+const request = async (ctx, url, options) => {
+  const {
+    origin, pathname, search, hash,
+  } = url;
+  const path = `${pathname}${search}${hash}`;
+
+  const {
+    options: {
+      h2: ctxOpts = {},
+    },
+    h2: {
+      sessionCache,
+    },
+  } = ctx;
+  const {
+    idleSessionTimeout = SESSION_IDLE_TIMEOUT,
+    pushPromiseHandler,
+    pushHandler,
+  } = ctxOpts;
+
+  const opts = { ...options };
+  const {
+    method,
+    headers,
+    socket,
+    body,
+  } = opts;
+  if (socket) {
+    delete opts.socket;
+  }
+  /* istanbul ignore else */
+  if (headers.host) {
+    headers[':authority'] = headers.host;
+    delete headers.host;
+  }
+
+  return new Promise((resolve, reject) => {
+    // lookup session from session cache
+    let session = sessionCache[origin];
+    if (!session || session.closed || session.destroyed) {
+      // connect and setup new session
+      // (connect options: https://nodejs.org/api/http2.html#http2_http2_connect_authority_options_listener)
+      const rejectUnauthorized = !((ctx.options.rejectUnauthorized === false
+        || ctxOpts.rejectUnauthorized === false));
+      const connectOptions = { ...ctxOpts, rejectUnauthorized };
+      if (socket && !socket.inUse) {
+        // we've got a socket from initial protocol negotiation via ALPN
+        // reuse socket for new session
+        connectOptions.createConnection = (/* url, options */) => {
+          debug(`reusing socket #${socket.id} (${socket.servername})`);
+          socket.inUse = true;
+          return socket;
+        };
+      }
+
+      const enablePush = !!(pushPromiseHandler || pushHandler);
+      session = connect(origin, { ...connectOptions, settings: { enablePush } });
+      session.setMaxListeners(1000);
+      session.setTimeout(idleSessionTimeout, () => {
+        debug(`closing session ${origin} after ${idleSessionTimeout} ms of inactivity`);
+        session.close();
+      });
+      session.once('connect', () => {
+        debug(`session ${origin} established`);
+        debug(`caching session ${origin}`);
+        sessionCache[origin] = session;
+      });
+      session.on('localSettings', (settings) => {
+        debug(`session ${origin} localSettings: ${JSON.stringify(settings)}`);
+      });
+      session.on('remoteSettings', (settings) => {
+        debug(`session ${origin} remoteSettings: ${JSON.stringify(settings)}`);
+      });
+      session.once('close', () => {
+        debug(`session ${origin} closed`);
+        /* istanbul ignore else */
+        if (sessionCache[origin] === session) {
+          debug(`discarding cached session ${origin}`);
+          delete sessionCache[origin];
+        }
+      });
+      session.once('error', /* istanbul ignore next */ (err) => {
+        debug(`session ${origin} encountered error: ${err}`);
+        if (sessionCache[origin] === session) {
+          // FIXME: redundant because 'close' event will follow?
+          debug(`discarding cached session ${origin}`);
+          delete sessionCache[origin];
+        }
+      });
+      session.on('frameError', /* istanbul ignore next */ (type, code, id) => {
+        debug(`session ${origin} encountered frameError: type: ${type}, code: ${code}, id: ${id}`);
+      });
+      session.once('goaway', /* istanbul ignore next */ (errorCode, lastStreamID, opaqueData) => {
+        debug(`session ${origin} received GOAWAY frame: errorCode: ${errorCode}, lastStreamID: ${lastStreamID}, opaqueData: ${opaqueData ? opaqueData.toString() : undefined}`);
+        // session will be closed automatically
+      });
+      session.on('stream', (stream, hdrs, flags) => {
+        handlePush(ctx, origin, stream, hdrs, flags);
+      });
+    } else {
+      // we have a cached session
+      /* istanbul ignore next */
+      // eslint-disable-next-line no-lonely-if
+      if (socket && socket.id !== session.socket.id && !socket.inUse) {
+        // we have no use for the passed socket
+        debug(`discarding redundant socket used for ALPN: #${socket.id} ${socket.servername}`);
+        socket.destroy();
+      }
+    }
+
+    debug(`${method} ${url.host}${path}`);
+    let req;
+
+    // intercept abort signal in order to cancel request
+    const { signal } = opts;
+    const onAbortSignal = () => {
+      signal.removeEventListener('abort', onAbortSignal);
+      reject(new RequestAbortedError());
+      /* istanbul ignore else */
+      if (req) {
+        req.close(NGHTTP2_CANCEL);
+      }
+    };
+    if (signal) {
+      if (signal.aborted) {
+        reject(new RequestAbortedError());
+        return;
+      }
+      signal.addEventListener('abort', onAbortSignal);
+    }
+
+    const onSessionError = /* istanbul ignore next */ (err) => {
+      debug(`session ${origin} encountered error during ${opts.method} ${url.href}: ${err}`);
+      reject(err);
+    };
+    // listen on session errors during request
+    session.once('error', onSessionError);
+
+    req = session.request({ ':method': method, ':path': path, ...headers });
+    req.once('response', (hdrs) => {
+      session.off('error', onSessionError);
+      if (signal) {
+        signal.removeEventListener('abort', onAbortSignal);
+      }
+      resolve(createResponse(hdrs, req, reject));
+    });
+    req.once('error', (err) => {
+      // error occured during the request
+      session.off('error', onSessionError);
+      /* istanbul ignore else */
+      if (signal) {
+        signal.removeEventListener('abort', onAbortSignal);
+      }
+      // if (!req.aborted) {
+      /* istanbul ignore else */
+      if (req.rstCode !== NGHTTP2_CANCEL) {
+        debug(`${opts.method} ${url.href} failed with: ${err.message}`);
+        req.close(NGHTTP2_CANCEL); // neccessary?
+        reject(err);
+      }
+    });
+    req.once('frameError', /* istanbul ignore next */ (type, code, id) => {
+      session.off('error', onSessionError);
+      debug(`encountered frameError during ${opts.method} ${url.href}: type: ${type}, code: ${code}, id: ${id}`);
+    });
+    req.on('push', /* istanbul ignore next */ (hdrs, flags) => {
+      debug(`received 'push' event: headers: ${JSON.stringify(hdrs)}, flags: ${flags}`);
+    });
+    // send request body?
+    if (body instanceof Readable) {
+      body.pipe(req);
+    } else {
+      if (body) {
+        req.write(body);
+      }
+      req.end();
+    }
+  });
+};
+
+module.exports = { request, setupContext, resetContext };
+
+
+/***/ }),
+
+/***/ 223:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+
+
+const debug = __nccwpck_require__(8237)('helix-fetch:core');
+
+const {
+  request,
+  setupContext,
+  resetContext,
+  RequestAbortedError,
+  ALPN_HTTP2,
+  ALPN_HTTP2C,
+  ALPN_HTTP1_1,
+  ALPN_HTTP1_0,
+} = __nccwpck_require__(6497);
+
+class RequestContext {
+  constructor(options) {
+    // setup context
+    this.options = { ...(options || {}) };
+    setupContext(this);
+  }
+
+  /**
+   * Returns the core API.
+   */
+  api() {
+    return {
+      /**
+       * Requests a resource from the network. Returns a Promise which resolves once
+       * the response is available.
+       *
+       * @param {string} url
+       * @param {Object} options
+       *
+       * @throws RequestAbortedError if the request is aborted via an AbortSignal
+       */
+      request: async (url, options) => this.request(url, options),
+
+      /**
+       * This function returns an object which looks like the global `helix-fetch` API,
+       * i.e. it will have the functions `request`, `reset`, etc. and provide its
+       * own isolated caches.
+       *
+       * @param {Object} options
+       */
+      context: (options = {}) => new RequestContext(options).api(),
+
+      /**
+       * Resets the current context, i.e. disconnects all open/pending sessions, clears caches etc..
+       */
+      reset: async () => this.reset(),
+
+      /**
+       * Error thrown if a request is aborted via an AbortSignal.
+       */
+      RequestAbortedError,
+
+      ALPN_HTTP2,
+      ALPN_HTTP2C,
+      ALPN_HTTP1_1,
+      ALPN_HTTP1_0,
+    };
+  }
+
+  async request(url, options) {
+    return request(this, url, options);
+  }
+
+  async reset() {
+    debug('resetting context');
+    return resetContext(this);
+  }
+}
+
+module.exports = new RequestContext().api();
+
+
+/***/ }),
+
+/***/ 4844:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+
+
+const { EventEmitter } = __nccwpck_require__(2361);
+
+/**
+ * Creates a lock (mutex) for asynchronous resources.
+ *
+ * Based on https://medium.com/trabe/synchronize-cache-updates-in-node-js-with-a-mutex-d5b395457138
+ */
+const lock = () => {
+  const locked = {};
+  const ee = new EventEmitter();
+  ee.setMaxListeners(0);
+
+  return {
+    /**
+     * Acquire a mutual exclusive lock.
+     *
+     * @param {string} key resource key to lock
+     * @returns {Promise<*>} Promise which resolves with an option value passed on #release
+     */
+    acquire: (key) => new Promise((resolve) => {
+      if (!locked[key]) {
+        locked[key] = true;
+        resolve();
+        return;
+      }
+
+      const tryAcquire = (value) => {
+        if (!locked[key]) {
+          locked[key] = true;
+          ee.removeListener(key, tryAcquire);
+          resolve(value);
+        }
+      };
+
+      ee.on(key, tryAcquire);
+    }),
+
+    /**
+     * Release the mutual exclusive lock.
+     *
+     * @param {string} key resource key to release
+     * @param {*} [value] optional value to be propagated
+     *                    to all the code that's waiting for
+     *                    the lock to release
+     */
+    release: (key, value) => {
+      Reflect.deleteProperty(locked, key);
+      setImmediate(() => ee.emit(key, value));
+    },
+  };
+};
+
+module.exports = lock;
+
+
+/***/ }),
+
+/***/ 6497:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+
+
+const { Readable } = __nccwpck_require__(2781);
+const tls = __nccwpck_require__(4404);
+
+const LRU = __nccwpck_require__(7129);
+const debug = __nccwpck_require__(8237)('helix-fetch:core');
+
+const { RequestAbortedError } = __nccwpck_require__(3575);
+const h1 = __nccwpck_require__(6379);
+const h2 = __nccwpck_require__(2308);
+const lock = __nccwpck_require__(4844);
+const { isPlainObject } = __nccwpck_require__(1713);
+const { isFormData, FormDataSerializer } = __nccwpck_require__(5244);
+
+const { version } = __nccwpck_require__(5258);
+
+const ALPN_HTTP2 = 'h2';
+const ALPN_HTTP2C = 'h2c';
+const ALPN_HTTP1_0 = 'http/1.0';
+const ALPN_HTTP1_1 = 'http/1.1';
+
+// context option defaults
+const ALPN_CACHE_SIZE = 100; // # of entries
+const ALPN_CACHE_TTL = 60 * 60 * 1000; // (ms): 1h
+const ALPN_PROTOCOLS = [ALPN_HTTP2, ALPN_HTTP1_1, ALPN_HTTP1_0];
+
+const DEFAULT_USER_AGENT = `helix-fetch/${version}`;
+
+// request option defaults
+const DEFAULT_OPTIONS = {
+  method: 'GET',
+  compress: true,
+};
+
+let socketIdCounter = 0;
+
+const connectionLock = lock();
+
+const connectTLS = (url, options) => new Promise((resolve, reject) => {
+  // intercept abort signal in order to cancel connect
+  const { signal } = options;
+  let socket;
+  const onAbortSignal = () => {
+    signal.removeEventListener('abort', onAbortSignal);
+    const err = new RequestAbortedError();
+    reject(err);
+    /* istanbul ignore else */
+    if (socket) {
+      socket.destroy(err);
+    }
+  };
+  if (signal) {
+    if (signal.aborted) {
+      reject(new RequestAbortedError());
+      return;
+    }
+    signal.addEventListener('abort', onAbortSignal);
+  }
+
+  const port = +url.port || 443;
+
+  const onError = (err) => {
+    // error occured while connecting
+    if (signal) {
+      signal.removeEventListener('abort', onAbortSignal);
+    }
+    if (!(err instanceof RequestAbortedError)) {
+      debug(`connecting to ${url.hostname}:${port} failed with: ${err.message}`);
+      reject(err);
+    }
+  };
+
+  socket = tls.connect(port, url.hostname, options);
+  socket.once('secureConnect', () => {
+    if (signal) {
+      signal.removeEventListener('abort', onAbortSignal);
+    }
+    socket.off('error', onError);
+    socketIdCounter += 1;
+    socket.id = socketIdCounter;
+    // workaround for node >= 12.17.0 regression
+    // (see https://github.com/nodejs/node/pull/34859)
+    socket.secureConnecting = false;
+    debug(`established TLS connection: #${socket.id} (${socket.servername})`);
+    resolve(socket);
+  });
+  socket.once('error', onError);
+});
+
+const connect = async (url, options) => {
+  // use mutex to avoid concurrent socket creation to same origin
+  let socket = await connectionLock.acquire(url.origin);
+  try {
+    if (!socket) {
+      socket = await connectTLS(url, options);
+    }
+    return socket;
+  } finally {
+    connectionLock.release(url.origin, socket);
+  }
+};
+
+const determineProtocol = async (ctx, url, signal) => {
+  // url.origin is null if url.protocol is neither 'http:' nor 'https:' ...
+  const origin = `${url.protocol}//${url.host}`;
+  // lookup ALPN cache
+  let protocol = ctx.alpnCache.get(origin);
+  if (protocol) {
+    return { protocol };
+  }
+  switch (url.protocol) {
+    case 'http:':
+      // for simplicity we assume unencrypted HTTP to be HTTP/1.1
+      // (although, theoretically, it could also be plain-text HTTP/2 (h2c))
+      protocol = ALPN_HTTP1_1;
+      ctx.alpnCache.set(origin, protocol);
+      return { protocol };
+
+    case 'http2:':
+      // HTTP/2 over TCP (h2c)
+      protocol = ALPN_HTTP2C;
+      ctx.alpnCache.set(origin, protocol);
+      return { protocol };
+
+    case 'https:':
+      // need to negotiate protocol
+      break;
+
+    default:
+      throw new TypeError(`unsupported protocol: ${url.protocol}`);
+  }
+
+  // negotioate via ALPN
+  const {
+    options: {
+      rejectUnauthorized: _rejectUnauthorized,
+      h1: h1Opts = {},
+      h2: h2Opts = {},
+    },
+  } = ctx;
+  const rejectUnauthorized = !((_rejectUnauthorized === false
+    || h1Opts.rejectUnauthorized === false
+    || h2Opts.rejectUnauthorized === false));
+  const connectOptions = {
+    servername: url.hostname, // enable SNI (Server Name Indication) extension
+    ALPNProtocols: ctx.alpnProtocols,
+    signal, // optional abort signal
+    rejectUnauthorized,
+  };
+  const socket = await connect(url, connectOptions);
+  // socket.alpnProtocol contains the negotiated protocol (e.g. 'h2', 'http1.1', 'http1.0')
+  protocol = socket.alpnProtocol;
+  /* istanbul ignore if */
+  if (!protocol) {
+    protocol = ALPN_HTTP1_1; // default fallback
+  }
+  ctx.alpnCache.set(origin, protocol);
+  return { protocol, socket };
+};
+
+const sanitizeHeaders = (headers) => {
+  const result = {};
+  // make all header names lower case
+  Object.keys(headers).forEach((name) => {
+    result[name.toLowerCase()] = headers[name];
+  });
+  return result;
+};
+
+const request = async (ctx, uri, options) => {
+  const url = new URL(uri);
+
+  const opts = { ...DEFAULT_OPTIONS, ...(options || {}) };
+
+  // sanitze method name
+  /* istanbul ignore else */
+  if (typeof opts.method === 'string') {
+    opts.method = opts.method.toUpperCase();
+  }
+  // sanitize headers (lowercase names)
+  opts.headers = sanitizeHeaders(opts.headers || {});
+  // set Host header if none is provided
+  if (opts.headers.host === undefined) {
+    opts.headers.host = url.host;
+  }
+  // User-Agent header
+  /* istanbul ignore else */
+  if (ctx.userAgent) {
+    if (opts.headers['user-agent'] === undefined) {
+      opts.headers['user-agent'] = ctx.userAgent;
+    }
+  }
+  // some header magic
+  let contentType;
+  if (opts.body instanceof URLSearchParams) {
+    contentType = 'application/x-www-form-urlencoded; charset=utf-8';
+    opts.body = opts.body.toString();
+  } else if (isFormData(opts.body)) {
+    // spec-compliant FormData
+    const fd = new FormDataSerializer(opts.body);
+    contentType = fd.contentType();
+    opts.body = fd.stream();
+    /* istanbul ignore else */
+    if (opts.headers['transfer-encoding'] === undefined
+      && opts.headers['content-length'] === undefined) {
+      opts.headers['content-length'] = String(fd.length());
+    }
+  } else if (typeof opts.body === 'string' || opts.body instanceof String) {
+    contentType = 'text/plain; charset=utf-8';
+  } else if (isPlainObject(opts.body)) {
+    opts.body = JSON.stringify(opts.body);
+    contentType = 'application/json';
+  }
+  if (opts.headers['content-type'] === undefined && contentType !== undefined) {
+    opts.headers['content-type'] = contentType;
+  }
+  // by now all supported custom body types are converted to string or buffer
+  if (opts.body != null) {
+    if (!(opts.body instanceof Readable)) {
+      // non-stream body
+      if (!(typeof opts.body === 'string' || opts.body instanceof String)
+        && !Buffer.isBuffer(opts.body)) {
+        // neither a string or buffer: coerce to string
+        opts.body = String(opts.body);
+      }
+      // string or buffer body
+      /* istanbul ignore else */
+      if (opts.headers['transfer-encoding'] === undefined
+        && opts.headers['content-length'] === undefined) {
+        opts.headers['content-length'] = String(Buffer.isBuffer(opts.body)
+          ? opts.body.length
+          : Buffer.byteLength(opts.body, 'utf-8'));
+      }
+    }
+  }
+  if (opts.headers.accept === undefined) {
+    opts.headers.accept = '*/*';
+  }
+  if (opts.body == null && ['POST', 'PUT'].includes(opts.method)) {
+    opts.headers['content-length'] = '0';
+  }
+  if (opts.compress && opts.headers['accept-encoding'] === undefined) {
+    opts.headers['accept-encoding'] = 'gzip,deflate,br';
+  }
+
+  // extract optional abort signal
+  const { signal } = opts;
+
+  // delegate to protocol-specific request handler
+  const { protocol, socket = null } = await determineProtocol(ctx, url, signal);
+  debug(`${url.host} -> ${protocol}`);
+  switch (protocol) {
+    case ALPN_HTTP2:
+      try {
+        return await h2.request(ctx, url, socket ? { ...opts, socket } : opts);
+      } catch (err) {
+        const { code, message } = err;
+        if (code === 'ERR_HTTP2_ERROR' && message === 'Protocol error') {
+          // server potentially downgraded from h2 to h1: clear alpn cache entry
+          ctx.alpnCache.delete(`${url.protocol}//${url.host}`);
+        }
+        throw err;
+      }
+    case ALPN_HTTP2C:
+      // plain-text HTTP/2 (h2c)
+      // url.protocol = 'http:'; => doesn't work ?!
+      return h2.request(
+        ctx,
+        new URL(`http://${url.host}${url.pathname}${url.hash}${url.search}`),
+        socket ? /* istanbul ignore next */ { ...opts, socket } : opts,
+      );
+    /* istanbul ignore next */ case ALPN_HTTP1_0:
+    case ALPN_HTTP1_1:
+      return h1.request(ctx, url, socket ? { ...opts, socket } : opts);
+    /* istanbul ignore next */
+    default:
+      // dead branch: only here to make eslint stop complaining
+      throw new TypeError(`unsupported protocol: ${protocol}`);
+  }
+};
+
+const resetContext = async (ctx) => {
+  ctx.alpnCache.clear();
+  return Promise.all([
+    h1.resetContext(ctx),
+    h2.resetContext(ctx),
+  ]);
+};
+
+const setupContext = (ctx) => {
+  const {
+    options: {
+      alpnProtocols = ALPN_PROTOCOLS,
+      alpnCacheTTL = ALPN_CACHE_TTL,
+      alpnCacheSize = ALPN_CACHE_SIZE,
+      userAgent = DEFAULT_USER_AGENT,
+    },
+  } = ctx;
+
+  ctx.alpnProtocols = alpnProtocols;
+  ctx.alpnCache = new LRU({ max: alpnCacheSize, ttl: alpnCacheTTL });
+
+  ctx.userAgent = userAgent;
+
+  h1.setupContext(ctx);
+  h2.setupContext(ctx);
+};
+
+module.exports = {
+  request,
+  setupContext,
+  resetContext,
+  RequestAbortedError,
+  ALPN_HTTP2,
+  ALPN_HTTP2C,
+  ALPN_HTTP1_1,
+  ALPN_HTTP1_0,
+};
+
+
+/***/ }),
+
+/***/ 8671:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+/* eslint-disable max-classes-per-file */
+
+
+
+const { EventEmitter } = __nccwpck_require__(2361);
+
+const SIGNAL_INTERNALS = Symbol('AbortSignal internals');
+
+/**
+ * The AbortSignal class.
+ *
+ * @see https://dom.spec.whatwg.org/#interface-AbortSignal
+ */
+class AbortSignal {
+  constructor() {
+    this[SIGNAL_INTERNALS] = {
+      eventEmitter: new EventEmitter(),
+      onabort: null,
+      aborted: false,
+    };
+  }
+
+  get aborted() {
+    return this[SIGNAL_INTERNALS].aborted;
+  }
+
+  get onabort() {
+    return this[SIGNAL_INTERNALS].onabort;
+  }
+
+  set onabort(handler) {
+    this[SIGNAL_INTERNALS].onabort = handler;
+  }
+
+  get [Symbol.toStringTag]() {
+    return this.constructor.name;
+  }
+
+  removeEventListener(name, handler) {
+    this[SIGNAL_INTERNALS].eventEmitter.removeListener(name, handler);
+  }
+
+  addEventListener(name, handler) {
+    this[SIGNAL_INTERNALS].eventEmitter.on(name, handler);
+  }
+
+  dispatchEvent(type) {
+    const event = { type, target: this };
+    const handlerName = `on${type}`;
+
+    if (typeof this[SIGNAL_INTERNALS][handlerName] === 'function') {
+      this[handlerName](event);
+    }
+
+    this[SIGNAL_INTERNALS].eventEmitter.emit(type, event);
+  }
+
+  fire() {
+    this[SIGNAL_INTERNALS].aborted = true;
+    this.dispatchEvent('abort');
+  }
+}
+
+Object.defineProperties(AbortSignal.prototype, {
+  addEventListener: { enumerable: true },
+  removeEventListener: { enumerable: true },
+  dispatchEvent: { enumerable: true },
+  aborted: { enumerable: true },
+  onabort: { enumerable: true },
+});
+
+/**
+ * The TimeoutSignal class.
+ */
+class TimeoutSignal extends AbortSignal {
+  constructor(timeout) {
+    if (!Number.isInteger(timeout)) {
+      throw new TypeError(`Expected an integer, got ${typeof timeout}`);
+    }
+    super();
+    this[SIGNAL_INTERNALS].timerId = setTimeout(() => {
+      this.fire();
+    }, timeout);
+  }
+
+  /**
+   * Clear the timeout associated with this signal.
+   */
+  clear() {
+    clearTimeout(this[SIGNAL_INTERNALS].timerId);
+  }
+}
+
+Object.defineProperties(TimeoutSignal.prototype, {
+  clear: { enumerable: true },
+});
+
+const CONTROLLER_INTERNALS = Symbol('AbortController internals');
+
+/**
+ * The AbortController class.
+ *
+ * @see https://dom.spec.whatwg.org/#interface-abortcontroller
+ */
+class AbortController {
+  constructor() {
+    this[CONTROLLER_INTERNALS] = {
+      signal: new AbortSignal(),
+    };
+  }
+
+  get signal() {
+    return this[CONTROLLER_INTERNALS].signal;
+  }
+
+  get [Symbol.toStringTag]() {
+    return this.constructor.name;
+  }
+
+  abort() {
+    if (this[CONTROLLER_INTERNALS].signal.aborted) {
+      return;
+    }
+
+    this[CONTROLLER_INTERNALS].signal.fire();
+  }
+}
+
+Object.defineProperties(AbortController.prototype, {
+  signal: { enumerable: true },
+  abort: { enumerable: true },
+});
+
+module.exports = { AbortController, AbortSignal, TimeoutSignal };
+
+
+/***/ }),
+
+/***/ 6227:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+
+
+const { PassThrough, Readable } = __nccwpck_require__(2781);
+
+const { FetchError, FetchBaseError } = __nccwpck_require__(8860);
+const { streamToBuffer } = __nccwpck_require__(1713);
+
+const EMPTY_BUFFER = Buffer.alloc(0);
+const INTERNALS = Symbol('Body internals');
+
+/**
+ * Convert a NodeJS Buffer to an ArrayBuffer
+ *
+ * @see https://stackoverflow.com/a/31394257
+ *
+ * @param {Buffer} buf
+ * @returns {ArrayBuffer}
+ */
+const toArrayBuffer = (buf) => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+
+/**
+ * Consume the body's stream and return a Buffer with the stream's content.
+ *
+ * Ref: https://fetch.spec.whatwg.org/#concept-body-consume-body
+ *
+ * @param {Body} body
+ * @return Promise<Buffer>
+ */
+const consume = async (body) => {
+  if (body[INTERNALS].disturbed) {
+    throw new TypeError('Already read');
+  }
+
+  if (body[INTERNALS].error) {
+    throw new TypeError(`Stream had error: ${body[INTERNALS].error.message}`);
+  }
+
+  // eslint-disable-next-line no-param-reassign
+  body[INTERNALS].disturbed = true;
+
+  const { stream } = body[INTERNALS];
+
+  if (stream === null) {
+    return EMPTY_BUFFER;
+  }
+
+  return streamToBuffer(stream);
+};
+
+/**
+ * Body mixin
+ *
+ * @see https://fetch.spec.whatwg.org/#body
+ */
+class Body {
+  /**
+   * Constructs a new Body instance
+   *
+   * @constructor
+   * @param {Readable|Buffer|String|URLSearchParams|FormData} [body] (see https://fetch.spec.whatwg.org/#bodyinit-unions)
+   */
+  constructor(body) {
+    let stream;
+
+    if (body == null) {
+      stream = null;
+    } else if (body instanceof URLSearchParams) {
+      stream = Readable.from(body.toString());
+    } else if (body instanceof Readable) {
+      stream = body;
+    } else if (Buffer.isBuffer(body)) {
+      stream = Readable.from(body);
+    } else if (typeof body === 'string' || body instanceof String) {
+      stream = Readable.from(body);
+    } else {
+      // none of the above: coerce to string
+      stream = Readable.from(String(body));
+    }
+
+    this[INTERNALS] = {
+      stream,
+      disturbed: false,
+      error: null,
+    };
+    if (body instanceof Readable) {
+      stream.on('error', (err) => {
+        const error = err instanceof FetchBaseError
+          ? err
+          : new FetchError(`Invalid response body while trying to fetch ${this.url}: ${err.message}`, 'system', err);
+        this[INTERNALS].error = error;
+      });
+    }
+  }
+
+  /**
+   * Return a Node.js Readable stream.
+   * (deviation from spec)
+   *
+   * @return {Readable}
+   */
+  get body() {
+    return this[INTERNALS].stream;
+  }
+
+  get bodyUsed() {
+    return this[INTERNALS].disturbed;
+  }
+
+  /**
+   * Consume the body and return a promise that will resolve to a Node.js Buffer.
+   * (extension)
+   *
+   * @return {Promise<Buffer>}
+   */
+  async buffer() {
+    return consume(this);
+  }
+
+  /**
+   * Consume the body and return a promise that will resolve to an ArrayBuffer.
+   *
+   * @return {Promise<ArrayBuffer>}
+   */
+  async arrayBuffer() {
+    return toArrayBuffer(await this.buffer());
+  }
+
+  /**
+   * Consume the body and return a promise that will resolve to a String.
+   *
+   * @return {Promise<String>}
+   */
+  async text() {
+    const buf = await consume(this);
+    return buf.toString();
+  }
+
+  /**
+   * Consume the body and return a promise that will
+   * resolve to the result of JSON.parse(responseText).
+   *
+   * @return {Promise<*>}
+   */
+  async json() {
+    return JSON.parse(await this.text());
+  }
+}
+
+Object.defineProperties(Body.prototype, {
+  body: { enumerable: true },
+  bodyUsed: { enumerable: true },
+  arrayBuffer: { enumerable: true },
+  json: { enumerable: true },
+  text: { enumerable: true },
+});
+
+/**
+ * Clone the body's stream.
+ *
+ * @param {Body} body
+ * @return {Readable}
+ */
+const cloneStream = (body) => {
+  if (body[INTERNALS].disturbed) {
+    throw new TypeError('Cannot clone: already read');
+  }
+
+  const { stream } = body[INTERNALS];
+  let result = stream;
+
+  /* istanbul ignore else */
+  if (stream instanceof Readable) {
+    result = new PassThrough();
+    const clonedStream = new PassThrough();
+    stream.pipe(result);
+    stream.pipe(clonedStream);
+    // set body's stream to cloned stream and return result (i.e. the other clone)
+    // eslint-disable-next-line no-param-reassign
+    body[INTERNALS].stream = clonedStream;
+  }
+  return result;
+};
+
+/**
+ * Guesses the `Content-Type` based on the type of body.
+ *
+ * @param {Readable|Buffer|String|URLSearchParams|FormData} body Any options.body input
+ * @returns {string|null}
+ */
+const guessContentType = (body) => {
+  if (body === null) {
+    return null;
+  }
+
+  if (typeof body === 'string') {
+    return 'text/plain; charset=utf-8';
+  }
+
+  if (body instanceof URLSearchParams) {
+    return 'application/x-www-form-urlencoded; charset=utf-8';
+  }
+
+  if (Buffer.isBuffer(body)) {
+    return null;
+  }
+
+  /* istanbul ignore else */
+  if (body instanceof Readable) {
+    return null;
+  }
+
+  // fallback: body is coerced to string
+  return 'text/plain; charset=utf-8';
+};
+
+module.exports = {
+  Body,
+  cloneStream,
+  guessContentType,
+};
+
+
+/***/ }),
+
+/***/ 8220:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+/* eslint-disable max-classes-per-file */
+
+
+
+const { Readable } = __nccwpck_require__(2781);
+
+const { Headers } = __nccwpck_require__(3195);
+const { Response } = __nccwpck_require__(5731);
+
+const INTERNALS = Symbol('CacheableResponse internals');
+
+/**
+ * Convert a NodeJS Buffer to an ArrayBuffer
+ *
+ * @see https://stackoverflow.com/a/31394257
+ *
+ * @param {Buffer} buf
+ * @returns {ArrayBuffer}
+ */
+const toArrayBuffer = (buf) => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+
+/**
+ * Wrapper for the Fetch API Response class, providing support for buffering
+ * the body stream and thus allowing repeated reads of the body.
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/API/Response
+ */
+class CacheableResponse extends Response {
+  /**
+   * Constructs a new Response instance
+   *
+   * @constructor
+   * @param {Buffer} body
+   * @param {Object} [init]
+   */
+  constructor(body, init) {
+    super(body, init);
+
+    const headers = new Headers(init.headers);
+
+    this[INTERNALS] = {
+      headers,
+      bufferedBody: body,
+    };
+  }
+
+  get headers() {
+    return this[INTERNALS].headers;
+  }
+
+  set headers(headers) {
+    if (headers instanceof Headers) {
+      this[INTERNALS].headers = headers;
+    } else {
+      throw new TypeError('instance of Headers expected');
+    }
+  }
+
+  get body() {
+    return Readable.from(this[INTERNALS].bufferedBody);
+  }
+
+  // eslint-disable-next-line class-methods-use-this
+  get bodyUsed() {
+    return false;
+  }
+
+  async buffer() {
+    return this[INTERNALS].bufferedBody;
+  }
+
+  async arrayBuffer() {
+    return toArrayBuffer(this[INTERNALS].bufferedBody);
+  }
+
+  async text() {
+    return this[INTERNALS].bufferedBody.toString();
+  }
+
+  async json() {
+    return JSON.parse(await this.text());
+  }
+
+  clone() {
+    const {
+      url, status, statusText, headers, httpVersion, counter,
+    } = this;
+    return new CacheableResponse(
+      this[INTERNALS].bufferedBody,
+      {
+        url, status, statusText, headers, httpVersion, counter,
+      },
+    );
+  }
+
+  get [Symbol.toStringTag]() {
+    return this.constructor.name;
+  }
+}
+
+/**
+ * Creates a cacheable response.
+ *
+ * According to the Fetch API the body of a response can be read only once.
+ * In order to allow caching we need to serialize the body into a buffer first.
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/API/Body
+ *
+ * @param {Response} res
+ */
+const cacheableResponse = async (res) => {
+  const buf = await res.buffer();
+  const {
+    url, status, statusText, headers, httpVersion, counter,
+  } = res;
+  return new CacheableResponse(
+    buf,
+    {
+      url, status, statusText, headers, httpVersion, counter,
+    },
+  );
+};
+
+module.exports = { cacheableResponse };
+
+
+/***/ }),
+
+/***/ 8860:
+/***/ ((module) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+/* eslint-disable max-classes-per-file */
+
+
+
+class FetchBaseError extends Error {
+  constructor(message, type) {
+    super(message);
+    this.type = type;
+  }
+
+  get name() {
+    return this.constructor.name;
+  }
+
+  get [Symbol.toStringTag]() {
+    return this.constructor.name;
+  }
+}
+
+/**
+ * @typedef {{
+ *   address?: string, code: string, dest?: string, errno: number, info?: object,
+ *   message: string, path?: string, port?: number, syscall: string
+ * }} SystemError
+ */
+
+class FetchError extends FetchBaseError {
+  /**
+   * @param {string} message error message
+   * @param {string} [type] identifies the kind of error
+   * @param {SystemError} [systemError] node system error
+   */
+  constructor(message, type, systemError) {
+    super(message, type);
+    if (systemError) {
+      // eslint-disable-next-line no-multi-assign
+      this.code = this.errno = systemError.code;
+      this.erroredSysCall = systemError.syscall;
+    }
+  }
+}
+
+class AbortError extends FetchBaseError {
+  constructor(message, type = 'aborted') {
+    super(message, type);
+  }
+}
+
+module.exports = { FetchBaseError, FetchError, AbortError };
+
+
+/***/ }),
+
+/***/ 3195:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+
+
+const { validateHeaderName, validateHeaderValue } = __nccwpck_require__(3685);
+
+const { isPlainObject } = __nccwpck_require__(1713);
+
+const INTERNALS = Symbol('Headers internals');
+
+const normalizeName = (name) => {
+  const nm = typeof name !== 'string' ? String(name) : name;
+
+  /* istanbul ignore next */
+  if (typeof validateHeaderName === 'function') {
+    // since node 14.3.0
+    validateHeaderName(nm);
+  } else {
+    // eslint-disable-next-line no-lonely-if
+    if (!/^[\^`\-\w!#$%&'*+.|~]+$/.test(nm)) {
+      const err = new TypeError(`Header name must be a valid HTTP token [${nm}]`);
+      Object.defineProperty(err, 'code', { value: 'ERR_INVALID_HTTP_TOKEN' });
+      throw err;
+    }
+  }
+
+  return nm.toLowerCase();
+};
+
+const normalizeValue = (value) => {
+  const val = typeof value !== 'string' ? String(value) : value;
+
+  /* istanbul ignore next */
+  if (typeof validateHeaderValue === 'function') {
+    // since node 14.3.0
+    validateHeaderValue('dummy', val);
+  } else {
+    // eslint-disable-next-line no-lonely-if
+    if (/[^\t\u0020-\u007E\u0080-\u00FF]/.test(val)) {
+      const err = new TypeError(`Invalid character in header content ["${val}"]`);
+      Object.defineProperty(err, 'code', { value: 'ERR_INVALID_CHAR' });
+      throw err;
+    }
+  }
+
+  return val;
+};
+
+/**
+ * Headers class
+ *
+ * @see https://fetch.spec.whatwg.org/#headers-class
+ */
+class Headers {
+  /**
+   * Constructs a new Headers instance
+   *
+   * @constructor
+   * @param {Object} [init={}]
+   */
+  constructor(init = {}) {
+    this[INTERNALS] = {
+      map: new Map(),
+    };
+
+    if (init instanceof Headers) {
+      init.forEach((value, name) => {
+        this.append(name, value);
+      });
+    } else if (Array.isArray(init)) {
+      init.forEach(([name, value]) => {
+        this.append(name, value);
+      });
+    } else /* istanbul ignore else  */ if (isPlainObject(init)) {
+      for (const [name, value] of Object.entries(init)) {
+        this.append(name, value);
+      }
+    }
+  }
+
+  set(name, value) {
+    this[INTERNALS].map.set(normalizeName(name), normalizeValue(value));
+  }
+
+  has(name) {
+    return this[INTERNALS].map.has(normalizeName(name));
+  }
+
+  get(name) {
+    const val = this[INTERNALS].map.get(normalizeName(name));
+    return val === undefined ? null : val;
+  }
+
+  append(name, value) {
+    const nm = normalizeName(name);
+    const val = normalizeValue(value);
+    const oldVal = this[INTERNALS].map.get(nm);
+    this[INTERNALS].map.set(nm, oldVal ? `${oldVal}, ${val}` : val);
+  }
+
+  delete(name) {
+    this[INTERNALS].map.delete(normalizeName(name));
+  }
+
+  forEach(callback, thisArg) {
+    for (const name of this.keys()) {
+      callback.call(thisArg, this.get(name), name);
+    }
+  }
+
+  keys() {
+    return Array.from(this[INTERNALS].map.keys())
+      .sort();
+  }
+
+  * values() {
+    for (const name of this.keys()) {
+      yield this.get(name);
+    }
+  }
+
+  /**
+   * @type {() => IterableIterator<[string, string]>}
+   */
+  * entries() {
+    for (const name of this.keys()) {
+      yield [name, this.get(name)];
+    }
+  }
+
+  /**
+   * @type {() => IterableIterator<[string, string]>}
+   */
+  [Symbol.iterator]() {
+    return this.entries();
+  }
+
+  get [Symbol.toStringTag]() {
+    return this.constructor.name;
+  }
+
+  /**
+   * Returns the headers as a plain object.
+   * (extension)
+   *
+   * @return {object}
+   */
+  plain() {
+    return Object.fromEntries(this[INTERNALS].map);
+  }
+}
+
+/**
+ * Re-shaping object for Web IDL tests
+ */
+Object.defineProperties(
+  Headers.prototype,
+  [
+    'append',
+    'delete',
+    'entries',
+    'forEach',
+    'get',
+    'has',
+    'keys',
+    'set',
+    'values',
+  ].reduce((result, property) => {
+    // eslint-disable-next-line no-param-reassign
+    result[property] = { enumerable: true };
+    return result;
+  }, {}),
+);
+
+module.exports = {
+  Headers,
+};
+
+
+/***/ }),
+
+/***/ 5722:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+
+
+const { EventEmitter } = __nccwpck_require__(2361);
+const { Readable } = __nccwpck_require__(2781);
+
+const debug = __nccwpck_require__(8237)('helix-fetch');
+const LRU = __nccwpck_require__(7129);
+
+const { Body } = __nccwpck_require__(6227);
+const { Headers } = __nccwpck_require__(3195);
+const { Request } = __nccwpck_require__(8102);
+const { Response } = __nccwpck_require__(5731);
+const { FetchBaseError, FetchError, AbortError } = __nccwpck_require__(8860);
+const { AbortController, AbortSignal, TimeoutSignal } = __nccwpck_require__(8671);
+const CachePolicy = __nccwpck_require__(5661);
+const { cacheableResponse } = __nccwpck_require__(8220);
+const { sizeof } = __nccwpck_require__(1713);
+const { isFormData } = __nccwpck_require__(5244);
+
+// core abstraction layer
+const { context, RequestAbortedError } = __nccwpck_require__(223);
+
+const CACHEABLE_METHODS = ['GET', 'HEAD'];
+const DEFAULT_MAX_CACHE_ITEMS = 500;
+const DEFAULT_MAX_CACHE_SIZE = 100 * 1024 * 1024; // 100mb
+
+// events
+const PUSH_EVENT = 'push';
+
+/**
+ * Non-caching Fetch implementation
+ *
+ * @param {FetchContext} ctx
+ * @param {string|Request} url
+ * @param {Object} [options]
+ */
+const fetch = async (ctx, url, options) => {
+  const { request } = ctx.context;
+
+  const req = url instanceof Request && typeof options === 'undefined' ? url : /* istanbul ignore next */ new Request(url, options);
+
+  // extract options
+  const {
+    method, body, signal, compress, follow, redirect, init: { body: initBody },
+  } = req;
+
+  let coreResp;
+
+  if (signal && signal.aborted) {
+    const err = new AbortError('The operation was aborted.');
+    // cleanup request
+    /* istanbul ignore else */
+    if (req.init.body instanceof Readable) {
+      req.init.body.destroy(err);
+    }
+    throw err;
+  }
+
+  try {
+    // call underlying protocol agnostic abstraction;
+    // signal is passed to lower layer which throws a RequestAbortedError
+    // if the signal fires
+    coreResp = await request(req.url, {
+      ...options,
+      method,
+      headers: req.headers.plain(),
+      body: initBody && !(initBody instanceof Readable) && !isFormData(initBody) ? initBody : body,
+      compress,
+      follow,
+      redirect,
+      signal,
+    });
+  } catch (err) {
+    // cleanup request
+    if (initBody instanceof Readable) {
+      initBody.destroy(err);
+    }
+    /* istanbul ignore next */
+    if (err instanceof TypeError) {
+      throw err;
+    }
+    if (err instanceof RequestAbortedError) {
+      throw new AbortError('The operation was aborted.');
+    }
+    // wrap system error in a FetchError instance
+    throw new FetchError(err.message, 'system', err);
+  }
+
+  const abortHandler = () => {
+    // deregister from signal
+    signal.removeEventListener('abort', abortHandler);
+
+    const err = new AbortError('The operation was aborted.');
+    // cleanup request
+    /* istanbul ignore else */
+    if (req.init.body instanceof Readable) {
+      req.init.body.destroy(err);
+    }
+    // propagate error on response stream
+    coreResp.readable.emit('error', err);
+  };
+
+  if (signal) {
+    signal.addEventListener('abort', abortHandler);
+  }
+
+  const {
+    statusCode,
+    statusText,
+    httpVersion,
+    headers,
+    readable,
+  } = coreResp;
+
+  // redirect?
+  // https://fetch.spec.whatwg.org/#concept-http-fetch step 6
+  if ([301, 302, 303, 307, 308].includes(statusCode)) {
+    // https://fetch.spec.whatwg.org/#concept-http-fetch step 6.2
+    const { location } = headers;
+    // https://fetch.spec.whatwg.org/#concept-http-fetch step 6.3
+    const locationURL = location == null ? null : new URL(location, req.url);
+    // https://fetch.spec.whatwg.org/#concept-http-fetch step 6.5
+    switch (req.redirect) {
+      case 'manual':
+        break;
+      case 'error':
+        if (signal) {
+          // deregister from signal
+          signal.removeEventListener('abort', abortHandler);
+        }
+        throw new FetchError(`uri requested responds with a redirect, redirect mode is set to 'error': ${req.url}`, 'no-redirect');
+      case 'follow': {
+        // https://fetch.spec.whatwg.org/#http-redirect-fetch step 2
+        if (locationURL === null) {
+          break;
+        }
+
+        // https://fetch.spec.whatwg.org/#http-redirect-fetch step 5
+        if (req.counter >= req.follow) {
+          if (signal) {
+            // deregister from signal
+            signal.removeEventListener('abort', abortHandler);
+          }
+          throw new FetchError(`maximum redirect reached at: ${req.url}`, 'max-redirect');
+        }
+
+        // https://fetch.spec.whatwg.org/#http-redirect-fetch step 6 (counter increment)
+        // Create a new Request object.
+        const requestOptions = {
+          headers: new Headers(req.headers),
+          follow: req.follow,
+          compress: req.compress,
+          counter: req.counter + 1,
+          method: req.method,
+          body: req.body,
+          signal: req.signal,
+        };
+
+        // https://fetch.spec.whatwg.org/#http-redirect-fetch step 9
+        if (statusCode !== 303 && req.body && req.init.body instanceof Readable) {
+          if (signal) {
+            // deregister from signal
+            signal.removeEventListener('abort', abortHandler);
+          }
+          throw new FetchError('Cannot follow redirect with body being a readable stream', 'unsupported-redirect');
+        }
+
+        // https://fetch.spec.whatwg.org/#http-redirect-fetch step 11
+        if (statusCode === 303 || ((statusCode === 301 || statusCode === 302) && req.method === 'POST')) {
+          requestOptions.method = 'GET';
+          requestOptions.body = undefined;
+          requestOptions.headers.delete('content-length');
+        }
+
+        // https://fetch.spec.whatwg.org/#http-redirect-fetch step 15
+        if (signal) {
+          // deregister from signal
+          signal.removeEventListener('abort', abortHandler);
+        }
+        return fetch(ctx, new Request(locationURL, requestOptions));
+      }
+
+      /* istanbul ignore next */
+      default:
+        // fall through
+    }
+  }
+
+  if (signal) {
+    // deregister from signal once the response stream has ended or if there was an error
+    readable.once('end', () => {
+      signal.removeEventListener('abort', abortHandler);
+    });
+    readable.once('error', () => {
+      signal.removeEventListener('abort', abortHandler);
+    });
+  }
+
+  return new Response(
+    readable,
+    {
+      url: req.url,
+      status: statusCode,
+      statusText,
+      headers,
+      httpVersion,
+      counter: req.counter,
+    },
+  );
+};
+
+/**
+ * Cache the response as appropriate. The body stream of the
+ * response is consumed & buffered to allow repeated reads.
+ *
+ * @param {FetchContext} ctx context
+ * @param {Request} request
+ * @param {Response} response
+ * @returns {Response} cached response with buffered body or original response if uncached.
+ */
+const cacheResponse = async (ctx, request, response) => {
+  if (ctx.options.maxCacheSize === 0) {
+    // caching is disabled: return original response
+    return response;
+  }
+  if (!CACHEABLE_METHODS.includes(request.method)) {
+    // return original un-cacheable response
+    return response;
+  }
+  const policy = new CachePolicy(request, response, { shared: false });
+  if (policy.storable()) {
+    // update cache
+    // create cacheable response (i.e. make it reusable)
+    const cacheable = await cacheableResponse(response);
+    ctx.cache.set(request.url, { policy, response: cacheable }, policy.timeToLive());
+    return cacheable;
+  } else {
+    // return original un-cacheable response
+    return response;
+  }
+};
+
+/**
+ * Caching Fetch implementation, wrapper for non-caching Fetch
+ *
+ * @param {FetchContext} ctx
+ * @param {string|Request} url
+ * @param {Object} [options]
+ */
+const cachingFetch = async (ctx, url, options) => {
+  const req = new Request(url, options);
+
+  const lookupCache = ctx.options.maxCacheSize !== 0 && CACHEABLE_METHODS.includes(req.method)
+    // respect cache mode (https://developer.mozilla.org/en-US/docs/Web/API/Request/cache)
+    && !['no-store', 'reload'].includes(req.cache);
+  if (lookupCache) {
+    // check cache
+    const { policy, response } = ctx.cache.get(req.url) || {};
+    // TODO: respect cache mode (https://developer.mozilla.org/en-US/docs/Web/API/Request/cache)
+    if (policy && policy.satisfiesWithoutRevalidation(req)) {
+      // update headers of cached response: update age, remove uncacheable headers, etc.
+      response.headers = new Headers(policy.responseHeaders(response));
+
+      // decorate response before delivering it (fromCache=true)
+      const resp = response.clone();
+      resp.fromCache = true;
+      return resp;
+    }
+  }
+
+  // fetch
+  const resp = await fetch(ctx, req);
+  return req.cache !== 'no-store' ? cacheResponse(ctx, req, resp) : resp;
+};
+
+const createUrl = (url, qs = {}) => {
+  const urlWithQuery = new URL(url);
+  if (typeof qs !== 'object' || Array.isArray(qs)) {
+    throw new TypeError('qs: object expected');
+  }
+  Object.entries(qs).forEach(([k, v]) => {
+    if (Array.isArray(v)) {
+      v.forEach((entry) => urlWithQuery.searchParams.append(k, entry));
+    } else {
+      urlWithQuery.searchParams.append(k, v);
+    }
+  });
+  return urlWithQuery.href;
+};
+
+/**
+ * Creates a timeout signal which allows to specify
+ * a timeout for a `fetch` call via the `signal` option.
+ *
+ * @param {number} ms timeout in milliseconds
+ */
+const timeoutSignal = (ms) => new TimeoutSignal(ms);
+
+class FetchContext {
+  constructor(options) {
+    // setup context
+    this.options = { ...options };
+    // setup cache
+    const { maxCacheSize } = this.options;
+    let maxSize = typeof maxCacheSize === 'number' && maxCacheSize >= 0 ? maxCacheSize : DEFAULT_MAX_CACHE_SIZE;
+    let max = DEFAULT_MAX_CACHE_ITEMS;
+    if (maxSize === 0) {
+      // we need to set a dummy value as LRU would translate a 0 to Infinity
+      maxSize = 1;
+      // no need to allocate memory if cache is disabled
+      max = 1;
+    }
+    const sizeCalculation = ({ response }, _) => sizeof(response);
+    this.cache = new LRU({ max, maxSize, sizeCalculation });
+    // event emitter
+    this.eventEmitter = new EventEmitter();
+
+    this.options.h2 = this.options.h2 || {};
+    if (typeof this.options.h2.enablePush === 'undefined') {
+      this.options.h2.enablePush = true; // default
+    }
+    const { enablePush } = this.options.h2;
+    if (enablePush) {
+      // setup our pushPromiseHandler & pushHandler
+      this.options.h2.pushPromiseHandler = (url, headers, reject) => {
+        // strip HTTP/2 specific headers (:method, :authority, :path, :schema)
+        const hdrs = { ...headers };
+        Object.keys(hdrs)
+          .filter((name) => name.startsWith(':'))
+          .forEach((name) => delete hdrs[name]);
+        this.pushPromiseHandler(url, hdrs, reject);
+      };
+      // core HTTP/2 push handler: need to wrap the response
+      this.options.h2.pushHandler = (url, reqHeaders, response) => {
+        // strip HTTP/2 specific headers (:method, :authority, :path, :schema)
+        const hdrs = { ...reqHeaders };
+        Object.keys(hdrs)
+          .filter((name) => name.startsWith(':'))
+          .forEach((name) => delete hdrs[name]);
+        const {
+          statusCode,
+          statusText,
+          httpVersion,
+          headers,
+          readable,
+        } = response;
+        this.pushHandler(
+          url,
+          hdrs,
+          new Response(readable, {
+            url,
+            status: statusCode,
+            statusText,
+            headers,
+            httpVersion,
+          }),
+        );
+      };
+    }
+
+    this.context = context(this.options);
+  }
+
+  /**
+   * Returns the Fetch API.
+   */
+  api() {
+    return {
+      /**
+       * Fetches a resource from the network. Returns a Promise which resolves once
+       * the response is available.
+       *
+       * @param {string|Request} url
+       * @param {Object} [options]
+       * @returns {Promise<Response>}
+       * @throws FetchError
+       * @throws AbortError
+       * @throws TypeError
+       */
+      fetch: async (url, options) => this.fetch(url, options),
+
+      Body,
+      Headers,
+      Request,
+      Response,
+      AbortController,
+      AbortSignal,
+
+      // extensions
+
+      FetchBaseError,
+      FetchError,
+      AbortError,
+
+      /**
+       * This function returns an object which looks like the public API,
+       * i.e. it will have the functions `fetch`, `context`, `reset`, etc. and provide its
+       * own isolated caches and specific behavior according to `options`.
+       *
+       * @param {Object} options
+       */
+      context: (options = {}) => new FetchContext(options).api(),
+
+      /**
+       * Convenience function which creates a new context with disabled caching,
+       * the equivalent of `context({ maxCacheSize: 0 })`.
+       *
+       * The optional `options` parameter allows to specify further options.
+       *
+       * @param {Object} [options={}]
+       */
+      noCache: (options = {}) => new FetchContext({ ...options, maxCacheSize: 0 }).api(),
+
+      /**
+       * Convenience function which creates a new context with enforced HTTP/1.1 protocol,
+       * the equivalent of `context({ alpnProtocols: [ALPN_HTTP1_1] })`.
+       *
+       * The optional `options` parameter allows to specify further options.
+       *
+       * @param {Object} [options={}]
+       */
+      h1: (options = {}) => new FetchContext({
+        ...options, alpnProtocols: [this.context.ALPN_HTTP1_1],
+      }).api(),
+
+      /**
+       * Convenience function which creates a new context with enforced HTTP/1.1 protocol
+       * and persistent connections (keep-alive), the equivalent of
+       * `context({ alpnProtocols: [ALPN_HTTP1_1], h1: { keepAlive: true } })`.
+       *
+       * The optional `options` parameter allows to specify further options.
+       *
+       * @param {Object} [options={}]
+       */
+      keepAlive: (options = {}) => new FetchContext({
+        ...options, alpnProtocols: [this.context.ALPN_HTTP1_1], h1: { keepAlive: true },
+      }).api(),
+
+      /**
+       * Convenience function which creates a new context with disabled caching
+       * and enforced HTTP/1.1 protocol, a combination of `h1()` and `noCache()`.
+       *
+       * The optional `options` parameter allows to specify further options.
+       *
+       * @param {Object} [options={}]
+       */
+      h1NoCache: (options = {}) => new FetchContext({
+        ...options, maxCacheSize: 0, alpnProtocols: [this.context.ALPN_HTTP1_1],
+      }).api(),
+
+      /**
+       * Convenience function which creates a new context with disabled caching
+       * and enforced HTTP/1.1 protocol with persistent connections (keep-alive),
+       * a combination of `keepAlive()` and `noCache()`.
+       *
+       * The optional `options` parameter allows to specify further options.
+       *
+       * @param {Object} [options={}]
+       */
+      keepAliveNoCache: (options = {}) => new FetchContext({
+        ...options,
+        maxCacheSize: 0,
+        alpnProtocols: [this.context.ALPN_HTTP1_1],
+        h1: { keepAlive: true },
+      }).api(),
+
+      /**
+       * Resets the current context, i.e. disconnects all open/pending sessions, clears caches etc..
+       */
+      reset: async () => this.context.reset(),
+
+      /**
+       * Register a callback which gets called once a server Push has been received.
+       *
+       * @param {Function} fn callback function invoked with the url and the pushed Response
+       */
+      onPush: (fn) => this.onPush(fn),
+
+      /**
+       * Deregister a callback previously registered with {#onPush}.
+       *
+       * @param {Function} fn callback function registered with {#onPush}
+       */
+      offPush: (fn) => this.offPush(fn),
+
+      /**
+       * Create a URL with query parameters
+       *
+       * @param {string} url request url
+       * @param {object} [qs={}] request query parameters
+       */
+      createUrl,
+
+      /**
+       * Creates a timeout signal which allows to specify
+       * a timeout for a `fetch` operation via the `signal` option.
+       *
+       * @param {number} ms timeout in milliseconds
+       */
+      timeoutSignal,
+
+      /**
+       * Clear the cache entirely, throwing away all values.
+       */
+      clearCache: () => this.clearCache(),
+
+      /**
+       * Cache stats for diagnostic purposes
+       */
+      cacheStats: () => this.cacheStats(),
+
+      /**
+       * ALPN Constants
+       */
+      ALPN_HTTP2: this.context.ALPN_HTTP2,
+      ALPN_HTTP2C: this.context.ALPN_HTTP2C,
+      ALPN_HTTP1_1: this.context.ALPN_HTTP1_1,
+      ALPN_HTTP1_0: this.context.ALPN_HTTP1_0,
+    };
+  }
+
+  async fetch(url, options) {
+    return cachingFetch(this, url, options);
+  }
+
+  onPush(fn) {
+    return this.eventEmitter.on(PUSH_EVENT, fn);
+  }
+
+  offPush(fn) {
+    return this.eventEmitter.off(PUSH_EVENT, fn);
+  }
+
+  clearCache() {
+    this.cache.clear();
+  }
+
+  cacheStats() {
+    return {
+      size: this.cache.calculatedSize,
+      count: this.cache.size,
+    };
+  }
+
+  pushPromiseHandler(url, headers, reject) {
+    debug(`received server push promise: ${url}, headers: ${JSON.stringify(headers)}`);
+    const req = new Request(url, { headers });
+    // check if we've already cached the pushed resource
+    const { policy } = this.cache.get(url) || {};
+    if (policy && policy.satisfiesWithoutRevalidation(req)) {
+      debug(`already cached, reject push promise: ${url}, headers: ${JSON.stringify(headers)}`);
+      // already cached and still valid, cancel push promise
+      reject();
+    }
+  }
+
+  async pushHandler(url, headers, response) {
+    debug(`caching resource pushed by server: ${url}, reqHeaders: ${JSON.stringify(headers)}, status: ${response.status}, respHeaders: ${JSON.stringify(response.headers)}`);
+    // cache pushed resource
+    const cachedResponse = await cacheResponse(this, new Request(url, { headers }), response);
+    this.eventEmitter.emit(PUSH_EVENT, url, cachedResponse);
+  }
+}
+
+module.exports = new FetchContext().api();
+
+
+/***/ }),
+
+/***/ 5661:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+
+
+const CachePolicy = __nccwpck_require__(1002);
+
+const { Headers } = __nccwpck_require__(3195);
+
+/**
+ *
+ * @param {Request} req
+ * @returns {Object}
+ */
+const convertRequest = (req) => ({
+  url: req.url,
+  method: req.method,
+  headers: req.headers.plain(),
+});
+
+/**
+ *
+ * @param {Response} res
+ * @returns {Object}
+ */
+const convertResponse = (res) => ({
+  status: res.status,
+  headers: res.headers.plain(),
+});
+
+/**
+ * Wrapper for CachePolicy, supporting Request and Response argument types
+ * as specified by the Fetch API.
+ *
+ * @class
+ * @see https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API
+ * @see https://github.com/kornelski/http-cache-semantics
+ */
+class CachePolicyWrapper {
+  /**
+   * Creates a new CachePolicyWrapper instance.
+   *
+   * @see https://github.com/kornelski/http-cache-semantics#constructor-options
+   *
+   * @constructor
+   * @param {Request} req
+   * @param {Response} res
+   * @param {Object} options
+   */
+  constructor(req, res, options) {
+    this.policy = new CachePolicy(convertRequest(req), convertResponse(res), options);
+  }
+
+  /**
+   * @see https://github.com/kornelski/http-cache-semantics#storable
+   */
+  storable() {
+    return this.policy.storable();
+  }
+
+  /**
+   * @see https://github.com/kornelski/http-cache-semantics#satisfieswithoutrevalidationnewrequest
+   *
+   * @param {Request} req
+   * @returns boolean
+   */
+  satisfiesWithoutRevalidation(req) {
+    return this.policy.satisfiesWithoutRevalidation(convertRequest(req));
+  }
+
+  /**
+   * @see https://github.com/kornelski/http-cache-semantics#responseheaders
+   *
+   * @param {Response} res
+   * @returns {Headers}
+   */
+  responseHeaders(res) {
+    return new Headers(this.policy.responseHeaders(convertResponse(res)));
+  }
+
+  /**
+   * @see https://github.com/kornelski/http-cache-semantics#timetolive
+   */
+  timeToLive() {
+    return this.policy.timeToLive();
+  }
+/*
+  age() {
+    return this.policy.age();
+  }
+
+  maxAge() {
+    return this.policy.maxAge();
+  }
+
+  stale() {
+    return this.policy.stale();
+  }
+
+  revalidationHeaders(incomingReq) {
+    return this.policy.revalidationHeaders(convertRequest(incomingReq));
+  }
+
+  revalidatedPolicy(request, response) {
+    return this.policy.revalidatedPolicy(convertRequest(request), convertResponse(response));
+  }
+*/
+}
+
+module.exports = CachePolicyWrapper;
+
+
+/***/ }),
+
+/***/ 8102:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+
+
+const { AbortSignal } = __nccwpck_require__(8671);
+const { Body, cloneStream, guessContentType } = __nccwpck_require__(6227);
+const { Headers } = __nccwpck_require__(3195);
+
+const { isPlainObject } = __nccwpck_require__(1713);
+const { isFormData, FormDataSerializer } = __nccwpck_require__(5244);
+
+const DEFAULT_FOLLOW = 20;
+
+const INTERNALS = Symbol('Request internals');
+
+/**
+ * Request class
+ *
+ * @see https://fetch.spec.whatwg.org/#request-class
+ */
+class Request extends Body {
+  /**
+   * Constructs a new Request instance
+   *
+   * @constructor
+   * @param {Request|String} input
+   * @param {Object} [init={}]
+   */
+  constructor(input, init = {}) {
+    // normalize input
+    const req = input instanceof Request ? input : null;
+    const parsedURL = req ? new URL(req.url) : new URL(input);
+
+    let method = init.method || (req && req.method) || 'GET';
+    method = method.toUpperCase();
+
+    // eslint-disable-next-line no-eq-null, eqeqeq
+    if ((init.body != null // neither null nor undefined
+      || (req && req.body !== null))
+      && ['GET', 'HEAD'].includes(method)) {
+      throw new TypeError('Request with GET/HEAD method cannot have body');
+    }
+
+    let body = init.body || (req && req.body ? cloneStream(req) : null);
+    const headers = new Headers(init.headers || (req && req.headers) || {});
+
+    if (isFormData(body)) {
+      // spec-compliant FormData
+      /* istanbul ignore else */
+      if (!headers.has('content-type')) {
+        const fd = new FormDataSerializer(body);
+        body = fd.stream();
+        headers.set('content-type', fd.contentType());
+        /* istanbul ignore else */
+        if (!headers.has('transfer-encoding')
+          && !headers.has('content-length')) {
+          headers.set('content-length', fd.length());
+        }
+      }
+    }
+
+    if (!headers.has('content-type')) {
+      if (isPlainObject(body)) {
+        // extension: support plain js object body (JSON serialization)
+        body = JSON.stringify(body);
+        headers.set('content-type', 'application/json');
+      } else {
+        const contentType = guessContentType(body);
+        if (contentType) {
+          headers.set('content-type', contentType);
+        }
+      }
+    }
+
+    // call Body constructor
+    super(body);
+
+    let signal = req ? req.signal : null;
+    if ('signal' in init) {
+      signal = init.signal;
+    }
+
+    if (signal && !(signal instanceof AbortSignal)) {
+      throw new TypeError('signal needs to be an instance of AbortSignal');
+    }
+
+    const redirect = init.redirect || (req && req.redirect) || 'follow';
+    if (!['follow', 'error', 'manual'].includes(redirect)) {
+      throw new TypeError(`'${redirect}' is not a valid redirect option`);
+    }
+
+    const cache = init.cache || (req && req.cache) || 'default';
+    if (!['default', 'no-store', 'reload', 'no-cache', 'force-cache', 'only-if-cached'].includes(cache)) {
+      throw new TypeError(`'${cache}' is not a valid cache option`);
+    }
+
+    this[INTERNALS] = {
+      init: { ...init },
+      method,
+      redirect,
+      cache,
+      headers,
+      parsedURL,
+      signal,
+    };
+
+    // extension options
+    if (init.follow === undefined) {
+      if (!req || req.follow === undefined) {
+        this.follow = DEFAULT_FOLLOW;
+      } else {
+        this.follow = req.follow;
+      }
+    } else {
+      this.follow = init.follow;
+    }
+    this.counter = init.counter || (req && req.counter) || 0;
+    if (init.compress === undefined) {
+      if (!req || req.compress === undefined) {
+        // default
+        this.compress = true;
+      } else {
+        this.compress = req.compress;
+      }
+    } else {
+      this.compress = init.compress;
+    }
+  }
+
+  get method() {
+    return this[INTERNALS].method;
+  }
+
+  get url() {
+    return this[INTERNALS].parsedURL.toString();
+  }
+
+  get headers() {
+    return this[INTERNALS].headers;
+  }
+
+  get redirect() {
+    return this[INTERNALS].redirect;
+  }
+
+  get cache() {
+    return this[INTERNALS].cache;
+  }
+
+  get signal() {
+    return this[INTERNALS].signal;
+  }
+
+  /**
+   * Clone this request
+   *
+   * @return {Request}
+   */
+  clone() {
+    return new Request(this);
+  }
+
+  get init() {
+    return this[INTERNALS].init;
+  }
+
+  get [Symbol.toStringTag]() {
+    return this.constructor.name;
+  }
+}
+
+Object.defineProperties(Request.prototype, {
+  method: { enumerable: true },
+  url: { enumerable: true },
+  headers: { enumerable: true },
+  redirect: { enumerable: true },
+  cache: { enumerable: true },
+  clone: { enumerable: true },
+  signal: { enumerable: true },
+});
+
+module.exports = {
+  Request,
+};
+
+
+/***/ }),
+
+/***/ 5731:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+
+
+const { Body, cloneStream, guessContentType } = __nccwpck_require__(6227);
+const { Headers } = __nccwpck_require__(3195);
+
+const { isPlainObject } = __nccwpck_require__(1713);
+const { isFormData, FormDataSerializer } = __nccwpck_require__(5244);
+
+const INTERNALS = Symbol('Response internals');
+
+/**
+ * Response class
+ *
+ * @see https://fetch.spec.whatwg.org/#response-class
+ */
+class Response extends Body {
+  /**
+   * Constructs a new Response instance
+   *
+   * @constructor
+   * @param {Readable|Buffer|String|URLSearchParams} [body=null] (see https://fetch.spec.whatwg.org/#bodyinit-unions)
+   * @param {Object} [init={}]
+   */
+  constructor(body = null, init = {}) {
+    const headers = new Headers(init.headers);
+
+    let respBody = body;
+
+    if (isFormData(respBody)) {
+      // spec-compliant FormData
+      /* istanbul ignore else */
+      if (!headers.has('content-type')) {
+        const fd = new FormDataSerializer(respBody);
+        respBody = fd.stream();
+        headers.set('content-type', fd.contentType());
+        /* istanbul ignore else */
+        if (!headers.has('transfer-encoding')
+          && !headers.has('content-length')) {
+          headers.set('content-length', fd.length());
+        }
+      }
+    }
+
+    if (respBody !== null && !headers.has('content-type')) {
+      if (isPlainObject(respBody)) {
+        // extension: support plain js object body (JSON serialization)
+        respBody = JSON.stringify(respBody);
+        headers.set('content-type', 'application/json');
+      } else {
+        const contentType = guessContentType(respBody);
+        if (contentType) {
+          headers.set('content-type', contentType);
+        }
+      }
+    }
+
+    // call Body constructor
+    super(respBody);
+
+    this[INTERNALS] = {
+      url: init.url,
+      status: init.status || 200,
+      statusText: init.statusText || '',
+      headers,
+      httpVersion: init.httpVersion,
+      counter: init.counter,
+    };
+  }
+
+  get url() {
+    return this[INTERNALS].url || '';
+  }
+
+  get status() {
+    return this[INTERNALS].status;
+  }
+
+  get statusText() {
+    return this[INTERNALS].statusText;
+  }
+
+  get ok() {
+    return this[INTERNALS].status >= 200 && this[INTERNALS].status < 300;
+  }
+
+  get redirected() {
+    return this[INTERNALS].counter > 0;
+  }
+
+  get headers() {
+    return this[INTERNALS].headers;
+  }
+
+  // extension
+  get httpVersion() {
+    return this[INTERNALS].httpVersion;
+  }
+
+  /**
+   * Create a redirect response.
+   *
+   * @param {string} url The URL that the new response is to originate from.
+   * @param {number} [status=302] An optional status code for the response (default: 302)
+   * @returns {Response} A Response object.
+   *
+   * See https://fetch.spec.whatwg.org/#dom-response-redirect
+   */
+  static redirect(url, status = 302) {
+    if (![301, 302, 303, 307, 308].includes(status)) {
+      throw new RangeError('Invalid status code');
+    }
+
+    return new Response(null, {
+      headers: {
+        location: new URL(url).toString(),
+      },
+      status,
+    });
+  }
+
+  /**
+   * Clone this response
+   *
+   * @returns {Response}
+   */
+  clone() {
+    if (this.bodyUsed) {
+      throw new TypeError('Cannot clone: already read');
+    }
+
+    return new Response(cloneStream(this), { ...this[INTERNALS] });
+  }
+
+  get [Symbol.toStringTag]() {
+    return this.constructor.name;
+  }
+}
+
+Object.defineProperties(Response.prototype, {
+  url: { enumerable: true },
+  status: { enumerable: true },
+  ok: { enumerable: true },
+  redirected: { enumerable: true },
+  statusText: { enumerable: true },
+  headers: { enumerable: true },
+  clone: { enumerable: true },
+});
+
+module.exports = {
+  Response,
+};
+
+
+/***/ }),
+
+/***/ 8614:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+/*
+ * Copyright 2020 Adobe. All rights reserved.
+ * This file is licensed to you under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License. You may obtain a copy
+ * of the License at http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
+ * OF ANY KIND, either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+
+
+
+module.exports = __nccwpck_require__(5722);
+
+
+/***/ }),
+
 /***/ 334:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -16839,6 +20162,850 @@ module.exports = resolveCommand;
 
 /***/ }),
 
+/***/ 8222:
+/***/ ((module, exports, __nccwpck_require__) => {
+
+/* eslint-env browser */
+
+/**
+ * This is the web browser implementation of `debug()`.
+ */
+
+exports.formatArgs = formatArgs;
+exports.save = save;
+exports.load = load;
+exports.useColors = useColors;
+exports.storage = localstorage();
+exports.destroy = (() => {
+	let warned = false;
+
+	return () => {
+		if (!warned) {
+			warned = true;
+			console.warn('Instance method `debug.destroy()` is deprecated and no longer does anything. It will be removed in the next major version of `debug`.');
+		}
+	};
+})();
+
+/**
+ * Colors.
+ */
+
+exports.colors = [
+	'#0000CC',
+	'#0000FF',
+	'#0033CC',
+	'#0033FF',
+	'#0066CC',
+	'#0066FF',
+	'#0099CC',
+	'#0099FF',
+	'#00CC00',
+	'#00CC33',
+	'#00CC66',
+	'#00CC99',
+	'#00CCCC',
+	'#00CCFF',
+	'#3300CC',
+	'#3300FF',
+	'#3333CC',
+	'#3333FF',
+	'#3366CC',
+	'#3366FF',
+	'#3399CC',
+	'#3399FF',
+	'#33CC00',
+	'#33CC33',
+	'#33CC66',
+	'#33CC99',
+	'#33CCCC',
+	'#33CCFF',
+	'#6600CC',
+	'#6600FF',
+	'#6633CC',
+	'#6633FF',
+	'#66CC00',
+	'#66CC33',
+	'#9900CC',
+	'#9900FF',
+	'#9933CC',
+	'#9933FF',
+	'#99CC00',
+	'#99CC33',
+	'#CC0000',
+	'#CC0033',
+	'#CC0066',
+	'#CC0099',
+	'#CC00CC',
+	'#CC00FF',
+	'#CC3300',
+	'#CC3333',
+	'#CC3366',
+	'#CC3399',
+	'#CC33CC',
+	'#CC33FF',
+	'#CC6600',
+	'#CC6633',
+	'#CC9900',
+	'#CC9933',
+	'#CCCC00',
+	'#CCCC33',
+	'#FF0000',
+	'#FF0033',
+	'#FF0066',
+	'#FF0099',
+	'#FF00CC',
+	'#FF00FF',
+	'#FF3300',
+	'#FF3333',
+	'#FF3366',
+	'#FF3399',
+	'#FF33CC',
+	'#FF33FF',
+	'#FF6600',
+	'#FF6633',
+	'#FF9900',
+	'#FF9933',
+	'#FFCC00',
+	'#FFCC33'
+];
+
+/**
+ * Currently only WebKit-based Web Inspectors, Firefox >= v31,
+ * and the Firebug extension (any Firefox version) are known
+ * to support "%c" CSS customizations.
+ *
+ * TODO: add a `localStorage` variable to explicitly enable/disable colors
+ */
+
+// eslint-disable-next-line complexity
+function useColors() {
+	// NB: In an Electron preload script, document will be defined but not fully
+	// initialized. Since we know we're in Chrome, we'll just detect this case
+	// explicitly
+	if (typeof window !== 'undefined' && window.process && (window.process.type === 'renderer' || window.process.__nwjs)) {
+		return true;
+	}
+
+	// Internet Explorer and Edge do not support colors.
+	if (typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.toLowerCase().match(/(edge|trident)\/(\d+)/)) {
+		return false;
+	}
+
+	// Is webkit? http://stackoverflow.com/a/16459606/376773
+	// document is undefined in react-native: https://github.com/facebook/react-native/pull/1632
+	return (typeof document !== 'undefined' && document.documentElement && document.documentElement.style && document.documentElement.style.WebkitAppearance) ||
+		// Is firebug? http://stackoverflow.com/a/398120/376773
+		(typeof window !== 'undefined' && window.console && (window.console.firebug || (window.console.exception && window.console.table))) ||
+		// Is firefox >= v31?
+		// https://developer.mozilla.org/en-US/docs/Tools/Web_Console#Styling_messages
+		(typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.toLowerCase().match(/firefox\/(\d+)/) && parseInt(RegExp.$1, 10) >= 31) ||
+		// Double check webkit in userAgent just in case we are in a worker
+		(typeof navigator !== 'undefined' && navigator.userAgent && navigator.userAgent.toLowerCase().match(/applewebkit\/(\d+)/));
+}
+
+/**
+ * Colorize log arguments if enabled.
+ *
+ * @api public
+ */
+
+function formatArgs(args) {
+	args[0] = (this.useColors ? '%c' : '') +
+		this.namespace +
+		(this.useColors ? ' %c' : ' ') +
+		args[0] +
+		(this.useColors ? '%c ' : ' ') +
+		'+' + module.exports.humanize(this.diff);
+
+	if (!this.useColors) {
+		return;
+	}
+
+	const c = 'color: ' + this.color;
+	args.splice(1, 0, c, 'color: inherit');
+
+	// The final "%c" is somewhat tricky, because there could be other
+	// arguments passed either before or after the %c, so we need to
+	// figure out the correct index to insert the CSS into
+	let index = 0;
+	let lastC = 0;
+	args[0].replace(/%[a-zA-Z%]/g, match => {
+		if (match === '%%') {
+			return;
+		}
+		index++;
+		if (match === '%c') {
+			// We only are interested in the *last* %c
+			// (the user may have provided their own)
+			lastC = index;
+		}
+	});
+
+	args.splice(lastC, 0, c);
+}
+
+/**
+ * Invokes `console.debug()` when available.
+ * No-op when `console.debug` is not a "function".
+ * If `console.debug` is not available, falls back
+ * to `console.log`.
+ *
+ * @api public
+ */
+exports.log = console.debug || console.log || (() => {});
+
+/**
+ * Save `namespaces`.
+ *
+ * @param {String} namespaces
+ * @api private
+ */
+function save(namespaces) {
+	try {
+		if (namespaces) {
+			exports.storage.setItem('debug', namespaces);
+		} else {
+			exports.storage.removeItem('debug');
+		}
+	} catch (error) {
+		// Swallow
+		// XXX (@Qix-) should we be logging these?
+	}
+}
+
+/**
+ * Load `namespaces`.
+ *
+ * @return {String} returns the previously persisted debug modes
+ * @api private
+ */
+function load() {
+	let r;
+	try {
+		r = exports.storage.getItem('debug');
+	} catch (error) {
+		// Swallow
+		// XXX (@Qix-) should we be logging these?
+	}
+
+	// If debug isn't set in LS, and we're in Electron, try to load $DEBUG
+	if (!r && typeof process !== 'undefined' && 'env' in process) {
+		r = process.env.DEBUG;
+	}
+
+	return r;
+}
+
+/**
+ * Localstorage attempts to return the localstorage.
+ *
+ * This is necessary because safari throws
+ * when a user disables cookies/localstorage
+ * and you attempt to access it.
+ *
+ * @return {LocalStorage}
+ * @api private
+ */
+
+function localstorage() {
+	try {
+		// TVMLKit (Apple TV JS Runtime) does not have a window object, just localStorage in the global context
+		// The Browser also has localStorage in the global context.
+		return localStorage;
+	} catch (error) {
+		// Swallow
+		// XXX (@Qix-) should we be logging these?
+	}
+}
+
+module.exports = __nccwpck_require__(6243)(exports);
+
+const {formatters} = module.exports;
+
+/**
+ * Map %j to `JSON.stringify()`, since no Web Inspectors do that by default.
+ */
+
+formatters.j = function (v) {
+	try {
+		return JSON.stringify(v);
+	} catch (error) {
+		return '[UnexpectedJSONParseError]: ' + error.message;
+	}
+};
+
+
+/***/ }),
+
+/***/ 6243:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+/**
+ * This is the common logic for both the Node.js and web browser
+ * implementations of `debug()`.
+ */
+
+function setup(env) {
+	createDebug.debug = createDebug;
+	createDebug.default = createDebug;
+	createDebug.coerce = coerce;
+	createDebug.disable = disable;
+	createDebug.enable = enable;
+	createDebug.enabled = enabled;
+	createDebug.humanize = __nccwpck_require__(900);
+	createDebug.destroy = destroy;
+
+	Object.keys(env).forEach(key => {
+		createDebug[key] = env[key];
+	});
+
+	/**
+	* The currently active debug mode names, and names to skip.
+	*/
+
+	createDebug.names = [];
+	createDebug.skips = [];
+
+	/**
+	* Map of special "%n" handling functions, for the debug "format" argument.
+	*
+	* Valid key names are a single, lower or upper-case letter, i.e. "n" and "N".
+	*/
+	createDebug.formatters = {};
+
+	/**
+	* Selects a color for a debug namespace
+	* @param {String} namespace The namespace string for the debug instance to be colored
+	* @return {Number|String} An ANSI color code for the given namespace
+	* @api private
+	*/
+	function selectColor(namespace) {
+		let hash = 0;
+
+		for (let i = 0; i < namespace.length; i++) {
+			hash = ((hash << 5) - hash) + namespace.charCodeAt(i);
+			hash |= 0; // Convert to 32bit integer
+		}
+
+		return createDebug.colors[Math.abs(hash) % createDebug.colors.length];
+	}
+	createDebug.selectColor = selectColor;
+
+	/**
+	* Create a debugger with the given `namespace`.
+	*
+	* @param {String} namespace
+	* @return {Function}
+	* @api public
+	*/
+	function createDebug(namespace) {
+		let prevTime;
+		let enableOverride = null;
+		let namespacesCache;
+		let enabledCache;
+
+		function debug(...args) {
+			// Disabled?
+			if (!debug.enabled) {
+				return;
+			}
+
+			const self = debug;
+
+			// Set `diff` timestamp
+			const curr = Number(new Date());
+			const ms = curr - (prevTime || curr);
+			self.diff = ms;
+			self.prev = prevTime;
+			self.curr = curr;
+			prevTime = curr;
+
+			args[0] = createDebug.coerce(args[0]);
+
+			if (typeof args[0] !== 'string') {
+				// Anything else let's inspect with %O
+				args.unshift('%O');
+			}
+
+			// Apply any `formatters` transformations
+			let index = 0;
+			args[0] = args[0].replace(/%([a-zA-Z%])/g, (match, format) => {
+				// If we encounter an escaped % then don't increase the array index
+				if (match === '%%') {
+					return '%';
+				}
+				index++;
+				const formatter = createDebug.formatters[format];
+				if (typeof formatter === 'function') {
+					const val = args[index];
+					match = formatter.call(self, val);
+
+					// Now we need to remove `args[index]` since it's inlined in the `format`
+					args.splice(index, 1);
+					index--;
+				}
+				return match;
+			});
+
+			// Apply env-specific formatting (colors, etc.)
+			createDebug.formatArgs.call(self, args);
+
+			const logFn = self.log || createDebug.log;
+			logFn.apply(self, args);
+		}
+
+		debug.namespace = namespace;
+		debug.useColors = createDebug.useColors();
+		debug.color = createDebug.selectColor(namespace);
+		debug.extend = extend;
+		debug.destroy = createDebug.destroy; // XXX Temporary. Will be removed in the next major release.
+
+		Object.defineProperty(debug, 'enabled', {
+			enumerable: true,
+			configurable: false,
+			get: () => {
+				if (enableOverride !== null) {
+					return enableOverride;
+				}
+				if (namespacesCache !== createDebug.namespaces) {
+					namespacesCache = createDebug.namespaces;
+					enabledCache = createDebug.enabled(namespace);
+				}
+
+				return enabledCache;
+			},
+			set: v => {
+				enableOverride = v;
+			}
+		});
+
+		// Env-specific initialization logic for debug instances
+		if (typeof createDebug.init === 'function') {
+			createDebug.init(debug);
+		}
+
+		return debug;
+	}
+
+	function extend(namespace, delimiter) {
+		const newDebug = createDebug(this.namespace + (typeof delimiter === 'undefined' ? ':' : delimiter) + namespace);
+		newDebug.log = this.log;
+		return newDebug;
+	}
+
+	/**
+	* Enables a debug mode by namespaces. This can include modes
+	* separated by a colon and wildcards.
+	*
+	* @param {String} namespaces
+	* @api public
+	*/
+	function enable(namespaces) {
+		createDebug.save(namespaces);
+		createDebug.namespaces = namespaces;
+
+		createDebug.names = [];
+		createDebug.skips = [];
+
+		let i;
+		const split = (typeof namespaces === 'string' ? namespaces : '').split(/[\s,]+/);
+		const len = split.length;
+
+		for (i = 0; i < len; i++) {
+			if (!split[i]) {
+				// ignore empty strings
+				continue;
+			}
+
+			namespaces = split[i].replace(/\*/g, '.*?');
+
+			if (namespaces[0] === '-') {
+				createDebug.skips.push(new RegExp('^' + namespaces.substr(1) + '$'));
+			} else {
+				createDebug.names.push(new RegExp('^' + namespaces + '$'));
+			}
+		}
+	}
+
+	/**
+	* Disable debug output.
+	*
+	* @return {String} namespaces
+	* @api public
+	*/
+	function disable() {
+		const namespaces = [
+			...createDebug.names.map(toNamespace),
+			...createDebug.skips.map(toNamespace).map(namespace => '-' + namespace)
+		].join(',');
+		createDebug.enable('');
+		return namespaces;
+	}
+
+	/**
+	* Returns true if the given mode name is enabled, false otherwise.
+	*
+	* @param {String} name
+	* @return {Boolean}
+	* @api public
+	*/
+	function enabled(name) {
+		if (name[name.length - 1] === '*') {
+			return true;
+		}
+
+		let i;
+		let len;
+
+		for (i = 0, len = createDebug.skips.length; i < len; i++) {
+			if (createDebug.skips[i].test(name)) {
+				return false;
+			}
+		}
+
+		for (i = 0, len = createDebug.names.length; i < len; i++) {
+			if (createDebug.names[i].test(name)) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	* Convert regexp to namespace
+	*
+	* @param {RegExp} regxep
+	* @return {String} namespace
+	* @api private
+	*/
+	function toNamespace(regexp) {
+		return regexp.toString()
+			.substring(2, regexp.toString().length - 2)
+			.replace(/\.\*\?$/, '*');
+	}
+
+	/**
+	* Coerce `val`.
+	*
+	* @param {Mixed} val
+	* @return {Mixed}
+	* @api private
+	*/
+	function coerce(val) {
+		if (val instanceof Error) {
+			return val.stack || val.message;
+		}
+		return val;
+	}
+
+	/**
+	* XXX DO NOT USE. This is a temporary stub function.
+	* XXX It WILL be removed in the next major release.
+	*/
+	function destroy() {
+		console.warn('Instance method `debug.destroy()` is deprecated and no longer does anything. It will be removed in the next major version of `debug`.');
+	}
+
+	createDebug.enable(createDebug.load());
+
+	return createDebug;
+}
+
+module.exports = setup;
+
+
+/***/ }),
+
+/***/ 8237:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+/**
+ * Detect Electron renderer / nwjs process, which is node, but we should
+ * treat as a browser.
+ */
+
+if (typeof process === 'undefined' || process.type === 'renderer' || process.browser === true || process.__nwjs) {
+	module.exports = __nccwpck_require__(8222);
+} else {
+	module.exports = __nccwpck_require__(5332);
+}
+
+
+/***/ }),
+
+/***/ 5332:
+/***/ ((module, exports, __nccwpck_require__) => {
+
+/**
+ * Module dependencies.
+ */
+
+const tty = __nccwpck_require__(6224);
+const util = __nccwpck_require__(3837);
+
+/**
+ * This is the Node.js implementation of `debug()`.
+ */
+
+exports.init = init;
+exports.log = log;
+exports.formatArgs = formatArgs;
+exports.save = save;
+exports.load = load;
+exports.useColors = useColors;
+exports.destroy = util.deprecate(
+	() => {},
+	'Instance method `debug.destroy()` is deprecated and no longer does anything. It will be removed in the next major version of `debug`.'
+);
+
+/**
+ * Colors.
+ */
+
+exports.colors = [6, 2, 3, 4, 5, 1];
+
+try {
+	// Optional dependency (as in, doesn't need to be installed, NOT like optionalDependencies in package.json)
+	// eslint-disable-next-line import/no-extraneous-dependencies
+	const supportsColor = __nccwpck_require__(132);
+
+	if (supportsColor && (supportsColor.stderr || supportsColor).level >= 2) {
+		exports.colors = [
+			20,
+			21,
+			26,
+			27,
+			32,
+			33,
+			38,
+			39,
+			40,
+			41,
+			42,
+			43,
+			44,
+			45,
+			56,
+			57,
+			62,
+			63,
+			68,
+			69,
+			74,
+			75,
+			76,
+			77,
+			78,
+			79,
+			80,
+			81,
+			92,
+			93,
+			98,
+			99,
+			112,
+			113,
+			128,
+			129,
+			134,
+			135,
+			148,
+			149,
+			160,
+			161,
+			162,
+			163,
+			164,
+			165,
+			166,
+			167,
+			168,
+			169,
+			170,
+			171,
+			172,
+			173,
+			178,
+			179,
+			184,
+			185,
+			196,
+			197,
+			198,
+			199,
+			200,
+			201,
+			202,
+			203,
+			204,
+			205,
+			206,
+			207,
+			208,
+			209,
+			214,
+			215,
+			220,
+			221
+		];
+	}
+} catch (error) {
+	// Swallow - we only care if `supports-color` is available; it doesn't have to be.
+}
+
+/**
+ * Build up the default `inspectOpts` object from the environment variables.
+ *
+ *   $ DEBUG_COLORS=no DEBUG_DEPTH=10 DEBUG_SHOW_HIDDEN=enabled node script.js
+ */
+
+exports.inspectOpts = Object.keys(process.env).filter(key => {
+	return /^debug_/i.test(key);
+}).reduce((obj, key) => {
+	// Camel-case
+	const prop = key
+		.substring(6)
+		.toLowerCase()
+		.replace(/_([a-z])/g, (_, k) => {
+			return k.toUpperCase();
+		});
+
+	// Coerce string value into JS value
+	let val = process.env[key];
+	if (/^(yes|on|true|enabled)$/i.test(val)) {
+		val = true;
+	} else if (/^(no|off|false|disabled)$/i.test(val)) {
+		val = false;
+	} else if (val === 'null') {
+		val = null;
+	} else {
+		val = Number(val);
+	}
+
+	obj[prop] = val;
+	return obj;
+}, {});
+
+/**
+ * Is stdout a TTY? Colored output is enabled when `true`.
+ */
+
+function useColors() {
+	return 'colors' in exports.inspectOpts ?
+		Boolean(exports.inspectOpts.colors) :
+		tty.isatty(process.stderr.fd);
+}
+
+/**
+ * Adds ANSI color escape codes if enabled.
+ *
+ * @api public
+ */
+
+function formatArgs(args) {
+	const {namespace: name, useColors} = this;
+
+	if (useColors) {
+		const c = this.color;
+		const colorCode = '\u001B[3' + (c < 8 ? c : '8;5;' + c);
+		const prefix = `  ${colorCode};1m${name} \u001B[0m`;
+
+		args[0] = prefix + args[0].split('\n').join('\n' + prefix);
+		args.push(colorCode + 'm+' + module.exports.humanize(this.diff) + '\u001B[0m');
+	} else {
+		args[0] = getDate() + name + ' ' + args[0];
+	}
+}
+
+function getDate() {
+	if (exports.inspectOpts.hideDate) {
+		return '';
+	}
+	return new Date().toISOString() + ' ';
+}
+
+/**
+ * Invokes `util.format()` with the specified arguments and writes to stderr.
+ */
+
+function log(...args) {
+	return process.stderr.write(util.format(...args) + '\n');
+}
+
+/**
+ * Save `namespaces`.
+ *
+ * @param {String} namespaces
+ * @api private
+ */
+function save(namespaces) {
+	if (namespaces) {
+		process.env.DEBUG = namespaces;
+	} else {
+		// If you set a process.env field to null or undefined, it gets cast to the
+		// string 'null' or 'undefined'. Just delete instead.
+		delete process.env.DEBUG;
+	}
+}
+
+/**
+ * Load `namespaces`.
+ *
+ * @return {String} returns the previously persisted debug modes
+ * @api private
+ */
+
+function load() {
+	return process.env.DEBUG;
+}
+
+/**
+ * Init logic for `debug` instances.
+ *
+ * Create a new `inspectOpts` object in case `useColors` is set
+ * differently for a particular `debug` instance.
+ */
+
+function init(debug) {
+	debug.inspectOpts = {};
+
+	const keys = Object.keys(exports.inspectOpts);
+	for (let i = 0; i < keys.length; i++) {
+		debug.inspectOpts[keys[i]] = exports.inspectOpts[keys[i]];
+	}
+}
+
+module.exports = __nccwpck_require__(6243)(exports);
+
+const {formatters} = module.exports;
+
+/**
+ * Map %o to `util.inspect()`, all on a single line.
+ */
+
+formatters.o = function (v) {
+	this.inspectOpts.colors = this.useColors;
+	return util.inspect(v, this.inspectOpts)
+		.split('\n')
+		.map(str => str.trim())
+		.join(' ');
+};
+
+/**
+ * Map %O to `util.inspect()`, allowing multiple lines if needed.
+ */
+
+formatters.O = function (v) {
+	this.inspectOpts.colors = this.useColors;
+	return util.inspect(v, this.inspectOpts);
+};
+
+
+/***/ }),
+
 /***/ 8932:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -17546,6 +21713,687 @@ module.exports = getStream;
 module.exports.buffer = (stream, options) => getStream(stream, Object.assign({}, options, {encoding: 'buffer'}));
 module.exports.array = (stream, options) => getStream(stream, Object.assign({}, options, {array: true}));
 module.exports.MaxBufferError = MaxBufferError;
+
+
+/***/ }),
+
+/***/ 1002:
+/***/ ((module) => {
+
+"use strict";
+
+// rfc7231 6.1
+const statusCodeCacheableByDefault = new Set([
+    200,
+    203,
+    204,
+    206,
+    300,
+    301,
+    404,
+    405,
+    410,
+    414,
+    501,
+]);
+
+// This implementation does not understand partial responses (206)
+const understoodStatuses = new Set([
+    200,
+    203,
+    204,
+    300,
+    301,
+    302,
+    303,
+    307,
+    308,
+    404,
+    405,
+    410,
+    414,
+    501,
+]);
+
+const errorStatusCodes = new Set([
+    500,
+    502,
+    503, 
+    504,
+]);
+
+const hopByHopHeaders = {
+    date: true, // included, because we add Age update Date
+    connection: true,
+    'keep-alive': true,
+    'proxy-authenticate': true,
+    'proxy-authorization': true,
+    te: true,
+    trailer: true,
+    'transfer-encoding': true,
+    upgrade: true,
+};
+
+const excludedFromRevalidationUpdate = {
+    // Since the old body is reused, it doesn't make sense to change properties of the body
+    'content-length': true,
+    'content-encoding': true,
+    'transfer-encoding': true,
+    'content-range': true,
+};
+
+function toNumberOrZero(s) {
+    const n = parseInt(s, 10);
+    return isFinite(n) ? n : 0;
+}
+
+// RFC 5861
+function isErrorResponse(response) {
+    // consider undefined response as faulty
+    if(!response) {
+        return true
+    }
+    return errorStatusCodes.has(response.status);
+}
+
+function parseCacheControl(header) {
+    const cc = {};
+    if (!header) return cc;
+
+    // TODO: When there is more than one value present for a given directive (e.g., two Expires header fields, multiple Cache-Control: max-age directives),
+    // the directive's value is considered invalid. Caches are encouraged to consider responses that have invalid freshness information to be stale
+    const parts = header.trim().split(/\s*,\s*/); // TODO: lame parsing
+    for (const part of parts) {
+        const [k, v] = part.split(/\s*=\s*/, 2);
+        cc[k] = v === undefined ? true : v.replace(/^"|"$/g, ''); // TODO: lame unquoting
+    }
+
+    return cc;
+}
+
+function formatCacheControl(cc) {
+    let parts = [];
+    for (const k in cc) {
+        const v = cc[k];
+        parts.push(v === true ? k : k + '=' + v);
+    }
+    if (!parts.length) {
+        return undefined;
+    }
+    return parts.join(', ');
+}
+
+module.exports = class CachePolicy {
+    constructor(
+        req,
+        res,
+        {
+            shared,
+            cacheHeuristic,
+            immutableMinTimeToLive,
+            ignoreCargoCult,
+            _fromObject,
+        } = {}
+    ) {
+        if (_fromObject) {
+            this._fromObject(_fromObject);
+            return;
+        }
+
+        if (!res || !res.headers) {
+            throw Error('Response headers missing');
+        }
+        this._assertRequestHasHeaders(req);
+
+        this._responseTime = this.now();
+        this._isShared = shared !== false;
+        this._cacheHeuristic =
+            undefined !== cacheHeuristic ? cacheHeuristic : 0.1; // 10% matches IE
+        this._immutableMinTtl =
+            undefined !== immutableMinTimeToLive
+                ? immutableMinTimeToLive
+                : 24 * 3600 * 1000;
+
+        this._status = 'status' in res ? res.status : 200;
+        this._resHeaders = res.headers;
+        this._rescc = parseCacheControl(res.headers['cache-control']);
+        this._method = 'method' in req ? req.method : 'GET';
+        this._url = req.url;
+        this._host = req.headers.host;
+        this._noAuthorization = !req.headers.authorization;
+        this._reqHeaders = res.headers.vary ? req.headers : null; // Don't keep all request headers if they won't be used
+        this._reqcc = parseCacheControl(req.headers['cache-control']);
+
+        // Assume that if someone uses legacy, non-standard uncecessary options they don't understand caching,
+        // so there's no point stricly adhering to the blindly copy&pasted directives.
+        if (
+            ignoreCargoCult &&
+            'pre-check' in this._rescc &&
+            'post-check' in this._rescc
+        ) {
+            delete this._rescc['pre-check'];
+            delete this._rescc['post-check'];
+            delete this._rescc['no-cache'];
+            delete this._rescc['no-store'];
+            delete this._rescc['must-revalidate'];
+            this._resHeaders = Object.assign({}, this._resHeaders, {
+                'cache-control': formatCacheControl(this._rescc),
+            });
+            delete this._resHeaders.expires;
+            delete this._resHeaders.pragma;
+        }
+
+        // When the Cache-Control header field is not present in a request, caches MUST consider the no-cache request pragma-directive
+        // as having the same effect as if "Cache-Control: no-cache" were present (see Section 5.2.1).
+        if (
+            res.headers['cache-control'] == null &&
+            /no-cache/.test(res.headers.pragma)
+        ) {
+            this._rescc['no-cache'] = true;
+        }
+    }
+
+    now() {
+        return Date.now();
+    }
+
+    storable() {
+        // The "no-store" request directive indicates that a cache MUST NOT store any part of either this request or any response to it.
+        return !!(
+            !this._reqcc['no-store'] &&
+            // A cache MUST NOT store a response to any request, unless:
+            // The request method is understood by the cache and defined as being cacheable, and
+            ('GET' === this._method ||
+                'HEAD' === this._method ||
+                ('POST' === this._method && this._hasExplicitExpiration())) &&
+            // the response status code is understood by the cache, and
+            understoodStatuses.has(this._status) &&
+            // the "no-store" cache directive does not appear in request or response header fields, and
+            !this._rescc['no-store'] &&
+            // the "private" response directive does not appear in the response, if the cache is shared, and
+            (!this._isShared || !this._rescc.private) &&
+            // the Authorization header field does not appear in the request, if the cache is shared,
+            (!this._isShared ||
+                this._noAuthorization ||
+                this._allowsStoringAuthenticated()) &&
+            // the response either:
+            // contains an Expires header field, or
+            (this._resHeaders.expires ||
+                // contains a max-age response directive, or
+                // contains a s-maxage response directive and the cache is shared, or
+                // contains a public response directive.
+                this._rescc['max-age'] ||
+                (this._isShared && this._rescc['s-maxage']) ||
+                this._rescc.public ||
+                // has a status code that is defined as cacheable by default
+                statusCodeCacheableByDefault.has(this._status))
+        );
+    }
+
+    _hasExplicitExpiration() {
+        // 4.2.1 Calculating Freshness Lifetime
+        return (
+            (this._isShared && this._rescc['s-maxage']) ||
+            this._rescc['max-age'] ||
+            this._resHeaders.expires
+        );
+    }
+
+    _assertRequestHasHeaders(req) {
+        if (!req || !req.headers) {
+            throw Error('Request headers missing');
+        }
+    }
+
+    satisfiesWithoutRevalidation(req) {
+        this._assertRequestHasHeaders(req);
+
+        // When presented with a request, a cache MUST NOT reuse a stored response, unless:
+        // the presented request does not contain the no-cache pragma (Section 5.4), nor the no-cache cache directive,
+        // unless the stored response is successfully validated (Section 4.3), and
+        const requestCC = parseCacheControl(req.headers['cache-control']);
+        if (requestCC['no-cache'] || /no-cache/.test(req.headers.pragma)) {
+            return false;
+        }
+
+        if (requestCC['max-age'] && this.age() > requestCC['max-age']) {
+            return false;
+        }
+
+        if (
+            requestCC['min-fresh'] &&
+            this.timeToLive() < 1000 * requestCC['min-fresh']
+        ) {
+            return false;
+        }
+
+        // the stored response is either:
+        // fresh, or allowed to be served stale
+        if (this.stale()) {
+            const allowsStale =
+                requestCC['max-stale'] &&
+                !this._rescc['must-revalidate'] &&
+                (true === requestCC['max-stale'] ||
+                    requestCC['max-stale'] > this.age() - this.maxAge());
+            if (!allowsStale) {
+                return false;
+            }
+        }
+
+        return this._requestMatches(req, false);
+    }
+
+    _requestMatches(req, allowHeadMethod) {
+        // The presented effective request URI and that of the stored response match, and
+        return (
+            (!this._url || this._url === req.url) &&
+            this._host === req.headers.host &&
+            // the request method associated with the stored response allows it to be used for the presented request, and
+            (!req.method ||
+                this._method === req.method ||
+                (allowHeadMethod && 'HEAD' === req.method)) &&
+            // selecting header fields nominated by the stored response (if any) match those presented, and
+            this._varyMatches(req)
+        );
+    }
+
+    _allowsStoringAuthenticated() {
+        //  following Cache-Control response directives (Section 5.2.2) have such an effect: must-revalidate, public, and s-maxage.
+        return (
+            this._rescc['must-revalidate'] ||
+            this._rescc.public ||
+            this._rescc['s-maxage']
+        );
+    }
+
+    _varyMatches(req) {
+        if (!this._resHeaders.vary) {
+            return true;
+        }
+
+        // A Vary header field-value of "*" always fails to match
+        if (this._resHeaders.vary === '*') {
+            return false;
+        }
+
+        const fields = this._resHeaders.vary
+            .trim()
+            .toLowerCase()
+            .split(/\s*,\s*/);
+        for (const name of fields) {
+            if (req.headers[name] !== this._reqHeaders[name]) return false;
+        }
+        return true;
+    }
+
+    _copyWithoutHopByHopHeaders(inHeaders) {
+        const headers = {};
+        for (const name in inHeaders) {
+            if (hopByHopHeaders[name]) continue;
+            headers[name] = inHeaders[name];
+        }
+        // 9.1.  Connection
+        if (inHeaders.connection) {
+            const tokens = inHeaders.connection.trim().split(/\s*,\s*/);
+            for (const name of tokens) {
+                delete headers[name];
+            }
+        }
+        if (headers.warning) {
+            const warnings = headers.warning.split(/,/).filter(warning => {
+                return !/^\s*1[0-9][0-9]/.test(warning);
+            });
+            if (!warnings.length) {
+                delete headers.warning;
+            } else {
+                headers.warning = warnings.join(',').trim();
+            }
+        }
+        return headers;
+    }
+
+    responseHeaders() {
+        const headers = this._copyWithoutHopByHopHeaders(this._resHeaders);
+        const age = this.age();
+
+        // A cache SHOULD generate 113 warning if it heuristically chose a freshness
+        // lifetime greater than 24 hours and the response's age is greater than 24 hours.
+        if (
+            age > 3600 * 24 &&
+            !this._hasExplicitExpiration() &&
+            this.maxAge() > 3600 * 24
+        ) {
+            headers.warning =
+                (headers.warning ? `${headers.warning}, ` : '') +
+                '113 - "rfc7234 5.5.4"';
+        }
+        headers.age = `${Math.round(age)}`;
+        headers.date = new Date(this.now()).toUTCString();
+        return headers;
+    }
+
+    /**
+     * Value of the Date response header or current time if Date was invalid
+     * @return timestamp
+     */
+    date() {
+        const serverDate = Date.parse(this._resHeaders.date);
+        if (isFinite(serverDate)) {
+            return serverDate;
+        }
+        return this._responseTime;
+    }
+
+    /**
+     * Value of the Age header, in seconds, updated for the current time.
+     * May be fractional.
+     *
+     * @return Number
+     */
+    age() {
+        let age = this._ageValue();
+
+        const residentTime = (this.now() - this._responseTime) / 1000;
+        return age + residentTime;
+    }
+
+    _ageValue() {
+        return toNumberOrZero(this._resHeaders.age);
+    }
+
+    /**
+     * Value of applicable max-age (or heuristic equivalent) in seconds. This counts since response's `Date`.
+     *
+     * For an up-to-date value, see `timeToLive()`.
+     *
+     * @return Number
+     */
+    maxAge() {
+        if (!this.storable() || this._rescc['no-cache']) {
+            return 0;
+        }
+
+        // Shared responses with cookies are cacheable according to the RFC, but IMHO it'd be unwise to do so by default
+        // so this implementation requires explicit opt-in via public header
+        if (
+            this._isShared &&
+            (this._resHeaders['set-cookie'] &&
+                !this._rescc.public &&
+                !this._rescc.immutable)
+        ) {
+            return 0;
+        }
+
+        if (this._resHeaders.vary === '*') {
+            return 0;
+        }
+
+        if (this._isShared) {
+            if (this._rescc['proxy-revalidate']) {
+                return 0;
+            }
+            // if a response includes the s-maxage directive, a shared cache recipient MUST ignore the Expires field.
+            if (this._rescc['s-maxage']) {
+                return toNumberOrZero(this._rescc['s-maxage']);
+            }
+        }
+
+        // If a response includes a Cache-Control field with the max-age directive, a recipient MUST ignore the Expires field.
+        if (this._rescc['max-age']) {
+            return toNumberOrZero(this._rescc['max-age']);
+        }
+
+        const defaultMinTtl = this._rescc.immutable ? this._immutableMinTtl : 0;
+
+        const serverDate = this.date();
+        if (this._resHeaders.expires) {
+            const expires = Date.parse(this._resHeaders.expires);
+            // A cache recipient MUST interpret invalid date formats, especially the value "0", as representing a time in the past (i.e., "already expired").
+            if (Number.isNaN(expires) || expires < serverDate) {
+                return 0;
+            }
+            return Math.max(defaultMinTtl, (expires - serverDate) / 1000);
+        }
+
+        if (this._resHeaders['last-modified']) {
+            const lastModified = Date.parse(this._resHeaders['last-modified']);
+            if (isFinite(lastModified) && serverDate > lastModified) {
+                return Math.max(
+                    defaultMinTtl,
+                    ((serverDate - lastModified) / 1000) * this._cacheHeuristic
+                );
+            }
+        }
+
+        return defaultMinTtl;
+    }
+
+    timeToLive() {
+        const age = this.maxAge() - this.age();
+        const staleIfErrorAge = age + toNumberOrZero(this._rescc['stale-if-error']);
+        const staleWhileRevalidateAge = age + toNumberOrZero(this._rescc['stale-while-revalidate']);
+        return Math.max(0, age, staleIfErrorAge, staleWhileRevalidateAge) * 1000;
+    }
+
+    stale() {
+        return this.maxAge() <= this.age();
+    }
+
+    _useStaleIfError() {
+        return this.maxAge() + toNumberOrZero(this._rescc['stale-if-error']) > this.age();
+    }
+
+    useStaleWhileRevalidate() {
+        return this.maxAge() + toNumberOrZero(this._rescc['stale-while-revalidate']) > this.age();
+    }
+
+    static fromObject(obj) {
+        return new this(undefined, undefined, { _fromObject: obj });
+    }
+
+    _fromObject(obj) {
+        if (this._responseTime) throw Error('Reinitialized');
+        if (!obj || obj.v !== 1) throw Error('Invalid serialization');
+
+        this._responseTime = obj.t;
+        this._isShared = obj.sh;
+        this._cacheHeuristic = obj.ch;
+        this._immutableMinTtl =
+            obj.imm !== undefined ? obj.imm : 24 * 3600 * 1000;
+        this._status = obj.st;
+        this._resHeaders = obj.resh;
+        this._rescc = obj.rescc;
+        this._method = obj.m;
+        this._url = obj.u;
+        this._host = obj.h;
+        this._noAuthorization = obj.a;
+        this._reqHeaders = obj.reqh;
+        this._reqcc = obj.reqcc;
+    }
+
+    toObject() {
+        return {
+            v: 1,
+            t: this._responseTime,
+            sh: this._isShared,
+            ch: this._cacheHeuristic,
+            imm: this._immutableMinTtl,
+            st: this._status,
+            resh: this._resHeaders,
+            rescc: this._rescc,
+            m: this._method,
+            u: this._url,
+            h: this._host,
+            a: this._noAuthorization,
+            reqh: this._reqHeaders,
+            reqcc: this._reqcc,
+        };
+    }
+
+    /**
+     * Headers for sending to the origin server to revalidate stale response.
+     * Allows server to return 304 to allow reuse of the previous response.
+     *
+     * Hop by hop headers are always stripped.
+     * Revalidation headers may be added or removed, depending on request.
+     */
+    revalidationHeaders(incomingReq) {
+        this._assertRequestHasHeaders(incomingReq);
+        const headers = this._copyWithoutHopByHopHeaders(incomingReq.headers);
+
+        // This implementation does not understand range requests
+        delete headers['if-range'];
+
+        if (!this._requestMatches(incomingReq, true) || !this.storable()) {
+            // revalidation allowed via HEAD
+            // not for the same resource, or wasn't allowed to be cached anyway
+            delete headers['if-none-match'];
+            delete headers['if-modified-since'];
+            return headers;
+        }
+
+        /* MUST send that entity-tag in any cache validation request (using If-Match or If-None-Match) if an entity-tag has been provided by the origin server. */
+        if (this._resHeaders.etag) {
+            headers['if-none-match'] = headers['if-none-match']
+                ? `${headers['if-none-match']}, ${this._resHeaders.etag}`
+                : this._resHeaders.etag;
+        }
+
+        // Clients MAY issue simple (non-subrange) GET requests with either weak validators or strong validators. Clients MUST NOT use weak validators in other forms of request.
+        const forbidsWeakValidators =
+            headers['accept-ranges'] ||
+            headers['if-match'] ||
+            headers['if-unmodified-since'] ||
+            (this._method && this._method != 'GET');
+
+        /* SHOULD send the Last-Modified value in non-subrange cache validation requests (using If-Modified-Since) if only a Last-Modified value has been provided by the origin server.
+        Note: This implementation does not understand partial responses (206) */
+        if (forbidsWeakValidators) {
+            delete headers['if-modified-since'];
+
+            if (headers['if-none-match']) {
+                const etags = headers['if-none-match']
+                    .split(/,/)
+                    .filter(etag => {
+                        return !/^\s*W\//.test(etag);
+                    });
+                if (!etags.length) {
+                    delete headers['if-none-match'];
+                } else {
+                    headers['if-none-match'] = etags.join(',').trim();
+                }
+            }
+        } else if (
+            this._resHeaders['last-modified'] &&
+            !headers['if-modified-since']
+        ) {
+            headers['if-modified-since'] = this._resHeaders['last-modified'];
+        }
+
+        return headers;
+    }
+
+    /**
+     * Creates new CachePolicy with information combined from the previews response,
+     * and the new revalidation response.
+     *
+     * Returns {policy, modified} where modified is a boolean indicating
+     * whether the response body has been modified, and old cached body can't be used.
+     *
+     * @return {Object} {policy: CachePolicy, modified: Boolean}
+     */
+    revalidatedPolicy(request, response) {
+        this._assertRequestHasHeaders(request);
+        if(this._useStaleIfError() && isErrorResponse(response)) {  // I consider the revalidation request unsuccessful
+          return {
+            modified: false,
+            matches: false,
+            policy: this,
+          };
+        }
+        if (!response || !response.headers) {
+            throw Error('Response headers missing');
+        }
+
+        // These aren't going to be supported exactly, since one CachePolicy object
+        // doesn't know about all the other cached objects.
+        let matches = false;
+        if (response.status !== undefined && response.status != 304) {
+            matches = false;
+        } else if (
+            response.headers.etag &&
+            !/^\s*W\//.test(response.headers.etag)
+        ) {
+            // "All of the stored responses with the same strong validator are selected.
+            // If none of the stored responses contain the same strong validator,
+            // then the cache MUST NOT use the new response to update any stored responses."
+            matches =
+                this._resHeaders.etag &&
+                this._resHeaders.etag.replace(/^\s*W\//, '') ===
+                    response.headers.etag;
+        } else if (this._resHeaders.etag && response.headers.etag) {
+            // "If the new response contains a weak validator and that validator corresponds
+            // to one of the cache's stored responses,
+            // then the most recent of those matching stored responses is selected for update."
+            matches =
+                this._resHeaders.etag.replace(/^\s*W\//, '') ===
+                response.headers.etag.replace(/^\s*W\//, '');
+        } else if (this._resHeaders['last-modified']) {
+            matches =
+                this._resHeaders['last-modified'] ===
+                response.headers['last-modified'];
+        } else {
+            // If the new response does not include any form of validator (such as in the case where
+            // a client generates an If-Modified-Since request from a source other than the Last-Modified
+            // response header field), and there is only one stored response, and that stored response also
+            // lacks a validator, then that stored response is selected for update.
+            if (
+                !this._resHeaders.etag &&
+                !this._resHeaders['last-modified'] &&
+                !response.headers.etag &&
+                !response.headers['last-modified']
+            ) {
+                matches = true;
+            }
+        }
+
+        if (!matches) {
+            return {
+                policy: new this.constructor(request, response),
+                // Client receiving 304 without body, even if it's invalid/mismatched has no option
+                // but to reuse a cached body. We don't have a good way to tell clients to do
+                // error recovery in such case.
+                modified: response.status != 304,
+                matches: false,
+            };
+        }
+
+        // use other header fields provided in the 304 (Not Modified) response to replace all instances
+        // of the corresponding header fields in the stored response.
+        const headers = {};
+        for (const k in this._resHeaders) {
+            headers[k] =
+                k in response.headers && !excludedFromRevalidationUpdate[k]
+                    ? response.headers[k]
+                    : this._resHeaders[k];
+        }
+
+        const newResponse = Object.assign({}, response, {
+            status: this._status,
+            method: this._method,
+            headers,
+        });
+        return {
+            policy: new this.constructor(request, newResponse, {
+                shared: this._isShared,
+                cacheHeuristic: this._cacheHeuristic,
+                immutableMinTimeToLive: this._immutableMinTtl,
+            }),
+            modified: false,
+            matches: true,
+        };
+    }
+};
 
 
 /***/ }),
@@ -20634,6 +25482,594 @@ module.exports = uniq;
 
 /***/ }),
 
+/***/ 7129:
+/***/ ((module) => {
+
+const perf = typeof performance === 'object' && performance &&
+  typeof performance.now === 'function' ? performance : Date
+
+const warned = new Set()
+const deprecatedOption = (opt, msg) => {
+  const code = `LRU_CACHE_OPTION_${opt}`
+  if (shouldWarn(code)) {
+    warn(code, `The ${opt} option is deprecated. ${msg}`, LRUCache)
+  }
+}
+const deprecatedMethod = (method, msg) => {
+  const code = `LRU_CACHE_METHOD_${method}`
+  if (shouldWarn(code)) {
+    const { prototype } = LRUCache
+    const { get } = Object.getOwnPropertyDescriptor(prototype, method)
+    warn(code, `The ${method} method is deprecated. ${msg}`, get)
+  }
+}
+const deprecatedProperty = (field, msg) => {
+  const code = `LRU_CACHE_PROPERTY_${field}`
+  if (shouldWarn(code)) {
+    const { prototype } = LRUCache
+    const { get } = Object.getOwnPropertyDescriptor(prototype, field)
+    warn(code, `The ${field} property is deprecated. ${msg}`, get)
+  }
+}
+const shouldWarn = (code) => !(process.noDeprecation || warned.has(code))
+const warn = (code, msg, fn) => {
+  warned.add(code)
+  process.emitWarning(msg, 'DeprecationWarning', code, fn)
+}
+
+const isPosInt = n => n && n === Math.floor(n) && n > 0 && isFinite(n)
+
+/* istanbul ignore next - This is a little bit ridiculous, tbh.
+ * The maximum array length is 2^32-1 or thereabouts on most JS impls.
+ * And well before that point, you're caching the entire world, I mean,
+ * that's ~32GB of just integers for the next/prev links, plus whatever
+ * else to hold that many keys and values.  Just filling the memory with
+ * zeroes at init time is brutal when you get that big.
+ * But why not be complete?
+ * Maybe in the future, these limits will have expanded. */
+const getUintArray = max => !isPosInt(max) ? null
+: max <= Math.pow(2, 8) ? Uint8Array
+: max <= Math.pow(2, 16) ? Uint16Array
+: max <= Math.pow(2, 32) ? Uint32Array
+: max <= Number.MAX_SAFE_INTEGER ? ZeroArray
+: null
+
+class ZeroArray extends Array {
+  constructor (size) {
+    super(size)
+    this.fill(0)
+  }
+}
+
+class Stack {
+  constructor (max) {
+    const UintArray = getUintArray(max)
+    this.heap = new UintArray(max)
+    this.length = 0
+  }
+  push (n) {
+    this.heap[this.length++] = n
+  }
+  pop () {
+    return this.heap[--this.length]
+  }
+}
+
+class LRUCache {
+  constructor (options = {}) {
+    const {
+      max,
+      ttl,
+      ttlResolution = 1,
+      ttlAutopurge,
+      updateAgeOnGet,
+      allowStale,
+      dispose,
+      disposeAfter,
+      noDisposeOnSet,
+      maxSize,
+      sizeCalculation,
+    } = options
+
+    // deprecated options, don't trigger a warning for getting them if
+    // the thing being passed in is another LRUCache we're copying.
+    const {
+      length,
+      maxAge,
+      stale,
+    } = options instanceof LRUCache ? {} : options
+
+    if (!isPosInt(max)) {
+      throw new TypeError('max option must be an integer')
+    }
+
+    const UintArray = getUintArray(max)
+    if (!UintArray) {
+      throw new Error('invalid max value: ' + max)
+    }
+
+    this.max = max
+    this.maxSize = maxSize || 0
+    this.sizeCalculation = sizeCalculation || length
+    if (this.sizeCalculation) {
+      if (!this.maxSize) {
+        throw new TypeError('cannot set sizeCalculation without setting maxSize')
+      }
+      if (typeof this.sizeCalculation !== 'function') {
+        throw new TypeError('sizeCalculating set to non-function')
+      }
+    }
+    this.keyMap = new Map()
+    this.keyList = new Array(max).fill(null)
+    this.valList = new Array(max).fill(null)
+    this.next = new UintArray(max)
+    this.prev = new UintArray(max)
+    this.head = 0
+    this.tail = 0
+    this.free = new Stack(max)
+    this.initialFill = 1
+    this.size = 0
+
+    if (typeof dispose === 'function') {
+      this.dispose = dispose
+    }
+    if (typeof disposeAfter === 'function') {
+      this.disposeAfter = disposeAfter
+      this.disposed = []
+    } else {
+      this.disposeAfter = null
+      this.disposed = null
+    }
+    this.noDisposeOnSet = !!noDisposeOnSet
+
+    if (this.maxSize) {
+      if (!isPosInt(this.maxSize)) {
+        throw new TypeError('maxSize must be a positive integer if specified')
+      }
+      this.initializeSizeTracking()
+    }
+
+    this.allowStale = !!allowStale || !!stale
+    this.updateAgeOnGet = !!updateAgeOnGet
+    this.ttlResolution = isPosInt(ttlResolution) || ttlResolution === 0
+      ? ttlResolution : 1
+    this.ttlAutopurge = !!ttlAutopurge
+    this.ttl = ttl || maxAge || 0
+    if (this.ttl) {
+      if (!isPosInt(this.ttl)) {
+        throw new TypeError('ttl must be a positive integer if specified')
+      }
+      this.initializeTTLTracking()
+    }
+
+    if (stale) {
+      deprecatedOption('stale', 'please use options.allowStale instead')
+    }
+    if (maxAge) {
+      deprecatedOption('maxAge', 'please use options.ttl instead')
+    }
+    if (length) {
+      deprecatedOption('length', 'please use options.sizeCalculation instead')
+    }
+  }
+
+  initializeTTLTracking () {
+    this.ttls = new ZeroArray(this.max)
+    this.starts = new ZeroArray(this.max)
+    this.setItemTTL = (index, ttl) => {
+      this.starts[index] = ttl !== 0 ? perf.now() : 0
+      this.ttls[index] = ttl
+      if (ttl !== 0 && this.ttlAutopurge) {
+        const t = setTimeout(() => {
+          if (this.isStale(index)) {
+            this.delete(this.keyList[index])
+          }
+        }, ttl + 1)
+        /* istanbul ignore else - unref() not supported on all platforms */
+        if (t.unref) {
+          t.unref()
+        }
+      }
+    }
+    this.updateItemAge = (index) => {
+      this.starts[index] = this.ttls[index] !== 0 ? perf.now() : 0
+    }
+    // debounce calls to perf.now() to 1s so we're not hitting
+    // that costly call repeatedly.
+    let cachedNow = 0
+    const getNow = () => {
+      const n = perf.now()
+      if (this.ttlResolution > 0) {
+        cachedNow = n
+        const t = setTimeout(() => cachedNow = 0, this.ttlResolution)
+        /* istanbul ignore else - not available on all platforms */
+        if (t.unref) {
+          t.unref()
+        }
+      }
+      return n
+    }
+    this.isStale = (index) => {
+      return this.ttls[index] !== 0 && this.starts[index] !== 0 &&
+        ((cachedNow || getNow()) - this.starts[index] > this.ttls[index])
+    }
+  }
+  updateItemAge (index) {}
+  setItemTTL (index, ttl) {}
+  isStale (index) { return false }
+
+  initializeSizeTracking () {
+    this.calculatedSize = 0
+    this.sizes = new ZeroArray(this.max)
+    this.removeItemSize = index => this.calculatedSize -= this.sizes[index]
+    this.addItemSize = (index, v, k, size, sizeCalculation) => {
+      const s = size || (sizeCalculation ? sizeCalculation(v, k) : 0)
+      this.sizes[index] = isPosInt(s) ? s : 0
+      const maxSize = this.maxSize - this.sizes[index]
+      while (this.calculatedSize > maxSize) {
+        this.evict()
+      }
+      this.calculatedSize += this.sizes[index]
+    }
+    this.delete = k => {
+      if (this.size !== 0) {
+        const index = this.keyMap.get(k)
+        if (index !== undefined) {
+          this.calculatedSize -= this.sizes[index]
+        }
+      }
+      return LRUCache.prototype.delete.call(this, k)
+    }
+  }
+  removeItemSize (index) {}
+  addItemSize (index, v, k, size, sizeCalculation) {}
+
+  *indexes () {
+    if (this.size) {
+      for (let i = this.tail; true; i = this.prev[i]) {
+        if (!this.isStale(i)) {
+          yield i
+        }
+        if (i === this.head) {
+          break
+        }
+      }
+    }
+  }
+  *rindexes () {
+    if (this.size) {
+      for (let i = this.head; true; i = this.next[i]) {
+        if (!this.isStale(i)) {
+          yield i
+        }
+        if (i === this.tail) {
+          break
+        }
+      }
+    }
+  }
+
+  *entries () {
+    for (const i of this.indexes()) {
+      yield [this.keyList[i], this.valList[i]]
+    }
+  }
+
+  *keys () {
+    for (const i of this.indexes()) {
+      yield this.keyList[i]
+    }
+  }
+
+  *values () {
+    for (const i of this.indexes()) {
+      yield this.valList[i]
+    }
+  }
+
+  [Symbol.iterator] () {
+    return this.entries()
+  }
+
+  find (fn, getOptions = {}) {
+    for (const i of this.indexes()) {
+      if (fn(this.valList[i], this.keyList[i], this)) {
+        return this.get(this.keyList[i], getOptions)
+      }
+    }
+  }
+
+  forEach (fn, thisp = this) {
+    for (const i of this.indexes()) {
+      fn.call(thisp, this.valList[i], this.keyList[i], this)
+    }
+  }
+
+  rforEach (fn, thisp = this) {
+    for (const i of this.rindexes()) {
+      fn.call(thisp, this.valList[i], this.keyList[i], this)
+    }
+  }
+
+  get prune () {
+    deprecatedMethod('prune', 'Please use cache.purgeStale() instead.')
+    return this.purgeStale
+  }
+
+  purgeStale () {
+    let deleted = false
+    if (this.size) {
+      for (let i = this.head; true; i = this.next[i]) {
+        const b = i === this.tail
+        if (this.isStale(i)) {
+          this.delete(this.keyList[i])
+          deleted = true
+        }
+        if (b) {
+          break
+        }
+      }
+    }
+    return deleted
+  }
+
+  dump () {
+    const arr = []
+    for (const i of this.indexes()) {
+      const key = this.keyList[i]
+      const value = this.valList[i]
+      const entry = { value }
+      if (this.ttls) {
+        entry.ttl = this.ttls[i]
+      }
+      if (this.sizes) {
+        entry.size = this.sizes[i]
+      }
+      arr.unshift([key, entry])
+    }
+    return arr
+  }
+
+  load (arr) {
+    this.clear()
+    for (const [key, entry] of arr) {
+      this.set(key, entry.value, entry)
+    }
+  }
+
+  dispose (v, k, reason) {}
+
+  set (k, v, {
+    ttl = this.ttl,
+    noDisposeOnSet = this.noDisposeOnSet,
+    size = 0,
+    sizeCalculation = this.sizeCalculation,
+  } = {}) {
+    let index = this.size === 0 ? undefined : this.keyMap.get(k)
+    if (index === undefined) {
+      // addition
+      index = this.newIndex()
+      this.keyList[index] = k
+      this.valList[index] = v
+      this.keyMap.set(k, index)
+      this.next[this.tail] = index
+      this.prev[index] = this.tail
+      this.tail = index
+      this.size ++
+      this.addItemSize(index, v, k, size, sizeCalculation)
+    } else {
+      // update
+      const oldVal = this.valList[index]
+      if (v !== oldVal) {
+        if (!noDisposeOnSet) {
+          this.dispose(oldVal, k, 'set')
+          if (this.disposeAfter) {
+            this.disposed.push([oldVal, k, 'set'])
+          }
+        }
+        this.removeItemSize(index)
+        this.valList[index] = v
+        this.addItemSize(index, v, k, size, sizeCalculation)
+      }
+      this.moveToTail(index)
+    }
+    if (ttl !== 0 && this.ttl === 0 && !this.ttls) {
+      this.initializeTTLTracking()
+    }
+    this.setItemTTL(index, ttl)
+    if (this.disposeAfter) {
+      while (this.disposed.length) {
+        this.disposeAfter(...this.disposed.shift())
+      }
+    }
+    return this
+  }
+
+  newIndex () {
+    if (this.size === 0) {
+      return this.tail
+    }
+    if (this.size === this.max) {
+      return this.evict()
+    }
+    if (this.free.length !== 0) {
+      return this.free.pop()
+    }
+    // initial fill, just keep writing down the list
+    return this.initialFill++
+  }
+
+  pop () {
+    if (this.size) {
+      const val = this.valList[this.head]
+      this.evict()
+      return val
+    }
+  }
+
+  evict () {
+    const head = this.head
+    const k = this.keyList[head]
+    const v = this.valList[head]
+    this.dispose(v, k, 'evict')
+    if (this.disposeAfter) {
+      this.disposed.push([v, k, 'evict'])
+    }
+    this.removeItemSize(head)
+    this.head = this.next[head]
+    this.keyMap.delete(k)
+    this.size --
+    return head
+  }
+
+  has (k) {
+    return this.keyMap.has(k) && !this.isStale(this.keyMap.get(k))
+  }
+
+  // like get(), but without any LRU updating or TTL expiration
+  peek (k, { allowStale = this.allowStale } = {}) {
+    const index = this.keyMap.get(k)
+    if (index !== undefined && (allowStale || !this.isStale(index))) {
+      return this.valList[index]
+    }
+  }
+
+  get (k, {
+    allowStale = this.allowStale,
+    updateAgeOnGet = this.updateAgeOnGet,
+  } = {}) {
+    const index = this.keyMap.get(k)
+    if (index !== undefined) {
+      if (this.isStale(index)) {
+        const value = allowStale ? this.valList[index] : undefined
+        this.delete(k)
+        return value
+      } else {
+        this.moveToTail(index)
+        if (updateAgeOnGet) {
+          this.updateItemAge(index)
+        }
+        return this.valList[index]
+      }
+    }
+  }
+
+  connect (p, n) {
+    this.prev[n] = p
+    this.next[p] = n
+  }
+
+  moveToTail (index) {
+    // if tail already, nothing to do
+    // if head, move head to next[index]
+    // else
+    //   move next[prev[index]] to next[index] (head has no prev)
+    //   move prev[next[index]] to prev[index]
+    // prev[index] = tail
+    // next[tail] = index
+    // tail = index
+    if (index !== this.tail) {
+      if (index === this.head) {
+        this.head = this.next[index]
+      } else {
+        this.connect(this.prev[index], this.next[index])
+      }
+      this.connect(this.tail, index)
+      this.tail = index
+    }
+  }
+
+  get del () {
+    deprecatedMethod('del', 'Please use cache.delete() instead.')
+    return this.delete
+  }
+  delete (k) {
+    let deleted = false
+    if (this.size !== 0) {
+      const index = this.keyMap.get(k)
+      if (index !== undefined) {
+        deleted = true
+        if (this.size === 1) {
+          this.clear()
+        } else {
+          this.removeItemSize(index)
+          this.dispose(this.valList[index], k, 'delete')
+          if (this.disposeAfter) {
+            this.disposed.push([this.valList[index], k, 'delete'])
+          }
+          this.keyMap.delete(k)
+          this.keyList[index] = null
+          this.valList[index] = null
+          if (index === this.tail) {
+            this.tail = this.prev[index]
+          } else if (index === this.head) {
+            this.head = this.next[index]
+          } else {
+            this.next[this.prev[index]] = this.next[index]
+            this.prev[this.next[index]] = this.prev[index]
+          }
+          this.size --
+          this.free.push(index)
+        }
+      }
+    }
+    if (this.disposed) {
+      while (this.disposed.length) {
+        this.disposeAfter(...this.disposed.shift())
+      }
+    }
+    return deleted
+  }
+
+  clear () {
+    if (this.dispose !== LRUCache.prototype.dispose) {
+      for (const index of this.rindexes()) {
+        this.dispose(this.valList[index], this.keyList[index], 'delete')
+      }
+    }
+    if (this.disposeAfter) {
+      for (const index of this.rindexes()) {
+        this.disposed.push([this.valList[index], this.keyList[index], 'delete'])
+      }
+    }
+    this.keyMap.clear()
+    this.valList.fill(null)
+    this.keyList.fill(null)
+    if (this.ttls) {
+      this.ttls.fill(0)
+      this.starts.fill(0)
+    }
+    if (this.sizes) {
+      this.sizes.fill(0)
+    }
+    this.head = 0
+    this.tail = 0
+    this.initialFill = 1
+    this.free.length = 0
+    this.calculatedSize = 0
+    this.size = 0
+    if (this.disposed) {
+      while (this.disposed.length) {
+        this.disposeAfter(...this.disposed.shift())
+      }
+    }
+  }
+  get reset () {
+    deprecatedMethod('reset', 'Please use cache.clear() instead.')
+    return this.clear
+  }
+
+  get length () {
+    deprecatedProperty('length', 'Please use cache.size instead.')
+    return this.size
+  }
+}
+
+module.exports = LRUCache
+
+
+/***/ }),
+
 /***/ 7493:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
@@ -20670,6 +26106,175 @@ const macosRelease = release => {
 module.exports = macosRelease;
 // TODO: remove this in the next major version
 module.exports["default"] = macosRelease;
+
+
+/***/ }),
+
+/***/ 900:
+/***/ ((module) => {
+
+/**
+ * Helpers.
+ */
+
+var s = 1000;
+var m = s * 60;
+var h = m * 60;
+var d = h * 24;
+var w = d * 7;
+var y = d * 365.25;
+
+/**
+ * Parse or format the given `val`.
+ *
+ * Options:
+ *
+ *  - `long` verbose formatting [false]
+ *
+ * @param {String|Number} val
+ * @param {Object} [options]
+ * @throws {Error} throw an error if val is not a non-empty string or a number
+ * @return {String|Number}
+ * @api public
+ */
+
+module.exports = function(val, options) {
+  options = options || {};
+  var type = typeof val;
+  if (type === 'string' && val.length > 0) {
+    return parse(val);
+  } else if (type === 'number' && isFinite(val)) {
+    return options.long ? fmtLong(val) : fmtShort(val);
+  }
+  throw new Error(
+    'val is not a non-empty string or a valid number. val=' +
+      JSON.stringify(val)
+  );
+};
+
+/**
+ * Parse the given `str` and return milliseconds.
+ *
+ * @param {String} str
+ * @return {Number}
+ * @api private
+ */
+
+function parse(str) {
+  str = String(str);
+  if (str.length > 100) {
+    return;
+  }
+  var match = /^(-?(?:\d+)?\.?\d+) *(milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|w|years?|yrs?|y)?$/i.exec(
+    str
+  );
+  if (!match) {
+    return;
+  }
+  var n = parseFloat(match[1]);
+  var type = (match[2] || 'ms').toLowerCase();
+  switch (type) {
+    case 'years':
+    case 'year':
+    case 'yrs':
+    case 'yr':
+    case 'y':
+      return n * y;
+    case 'weeks':
+    case 'week':
+    case 'w':
+      return n * w;
+    case 'days':
+    case 'day':
+    case 'd':
+      return n * d;
+    case 'hours':
+    case 'hour':
+    case 'hrs':
+    case 'hr':
+    case 'h':
+      return n * h;
+    case 'minutes':
+    case 'minute':
+    case 'mins':
+    case 'min':
+    case 'm':
+      return n * m;
+    case 'seconds':
+    case 'second':
+    case 'secs':
+    case 'sec':
+    case 's':
+      return n * s;
+    case 'milliseconds':
+    case 'millisecond':
+    case 'msecs':
+    case 'msec':
+    case 'ms':
+      return n;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Short format for `ms`.
+ *
+ * @param {Number} ms
+ * @return {String}
+ * @api private
+ */
+
+function fmtShort(ms) {
+  var msAbs = Math.abs(ms);
+  if (msAbs >= d) {
+    return Math.round(ms / d) + 'd';
+  }
+  if (msAbs >= h) {
+    return Math.round(ms / h) + 'h';
+  }
+  if (msAbs >= m) {
+    return Math.round(ms / m) + 'm';
+  }
+  if (msAbs >= s) {
+    return Math.round(ms / s) + 's';
+  }
+  return ms + 'ms';
+}
+
+/**
+ * Long format for `ms`.
+ *
+ * @param {Number} ms
+ * @return {String}
+ * @api private
+ */
+
+function fmtLong(ms) {
+  var msAbs = Math.abs(ms);
+  if (msAbs >= d) {
+    return plural(ms, msAbs, d, 'day');
+  }
+  if (msAbs >= h) {
+    return plural(ms, msAbs, h, 'hour');
+  }
+  if (msAbs >= m) {
+    return plural(ms, msAbs, m, 'minute');
+  }
+  if (msAbs >= s) {
+    return plural(ms, msAbs, s, 'second');
+  }
+  return ms + ' ms';
+}
+
+/**
+ * Pluralization helper.
+ */
+
+function plural(ms, msAbs, n, name) {
+  var isPlural = msAbs >= n * 1.5;
+  return Math.round(ms / n) + ' ' + name + (isPlural ? 's' : '');
+}
 
 
 /***/ }),
@@ -25206,6 +30811,14 @@ module.exports = eval("require")("encoding");
 
 /***/ }),
 
+/***/ 132:
+/***/ ((module) => {
+
+module.exports = eval("require")("supports-color");
+
+
+/***/ }),
+
 /***/ 9491:
 /***/ ((module) => {
 
@@ -25214,11 +30827,27 @@ module.exports = require("assert");
 
 /***/ }),
 
+/***/ 4300:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("buffer");
+
+/***/ }),
+
 /***/ 2081:
 /***/ ((module) => {
 
 "use strict";
 module.exports = require("child_process");
+
+/***/ }),
+
+/***/ 6113:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("crypto");
 
 /***/ }),
 
@@ -25243,6 +30872,14 @@ module.exports = require("fs");
 
 "use strict";
 module.exports = require("http");
+
+/***/ }),
+
+/***/ 5158:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("http2");
 
 /***/ }),
 
@@ -25294,6 +30931,14 @@ module.exports = require("tls");
 
 /***/ }),
 
+/***/ 6224:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("tty");
+
+/***/ }),
+
 /***/ 7310:
 /***/ ((module) => {
 
@@ -25315,6 +30960,14 @@ module.exports = require("util");
 
 "use strict";
 module.exports = require("zlib");
+
+/***/ }),
+
+/***/ 5258:
+/***/ ((module) => {
+
+"use strict";
+module.exports = JSON.parse('{"name":"@adobe/helix-fetch","version":"3.0.5","description":"Light-weight Fetch implementation transparently supporting both HTTP/1(.1) and HTTP/2","main":"src/index.js","scripts":{"test":" nyc --reporter=text --reporter=lcov --check-coverage --branches 100 --statements 100 --lines 100 mocha --recursive --timeout 5000","test-ci":"nyc --reporter=text --reporter=lcov --check-coverage --branches 100 --statements 100 --lines 100 mocha --recursive --timeout 5000 --reporter xunit --reporter-options output=./junit/test-results.xml && codecov","lint":"./node_modules/.bin/eslint .","semantic-release":"semantic-release"},"engines":{"node":">=12.0"},"types":"src/index.d.ts","exports":{"import":"./src/index.mjs","require":"./src/index.js"},"repository":{"type":"git","url":"https://github.com/adobe/helix-fetch"},"author":"","license":"Apache-2.0","bugs":{"url":"https://github.com/adobe/helix-fetch/issues"},"homepage":"https://github.com/adobe/helix-fetch#readme","keywords":["fetch","whatwg","Fetch API","http","https","http2","h2","promise","async","request","RFC 7234","7234","caching","cache"],"dependencies":{"debug":"4.3.3","http-cache-semantics":"4.1.0","lru-cache":"7.3.1"},"devDependencies":{"@adobe/eslint-config-helix":"1.3.2","@semantic-release/changelog":"6.0.1","@semantic-release/git":"10.0.1","chai":"4.3.6","chai-as-promised":"7.1.1","chai-iterator":"3.0.2","codecov":"3.8.3","eslint":"8.9.0","eslint-plugin-header":"3.1.1","eslint-plugin-import":"2.25.4","formdata-node":"4.3.2","lint-staged":"12.3.4","mocha":"9.2.0","nock":"13.2.4","nyc":"15.1.0","parse-cache-control":"1.0.1","pem":"1.14.6","semantic-release":"19.0.2","sinon":"13.0.1","stream-buffers":"3.0.2"},"lint-staged":{"*.js":"eslint"},"config":{"commitizen":{"path":"node_modules/cz-conventional-changelog"},"ghooks":{"pre-commit":"npx lint-staged"}}}');
 
 /***/ }),
 
@@ -25380,17 +31033,41 @@ var __webpack_exports__ = {};
  */
 const core = __nccwpck_require__(2186);
 const github = __nccwpck_require__(5438);
+const { fetch } = __nccwpck_require__(8614);
 
 async function run() {
   console.log('----- 1 -------');
   console.log(process.env.GITHUB_EVENT_NAME);
   console.log(JSON.stringify(github.context, null, 2));
-  const { payload } = github.context;
+  const { payload, eventName } = github.context;
+  const action = payload.action;
+  if (action !== 'completed' || eventName !== 'check_run') {
+    core.warning(`Invalid configuration. This action should only be triggered on "check_run:completed" events (was ${eventName}:${action})`);
+    return;
+  }
+
   const conclusion = payload?.check_run?.conclusion;
   if (conclusion !== 'failure') {
     console.log(`ignoring check run with conclusion: ${conclusion}`);
     return;
   }
+
+  const authToken = new github.GitHub(
+    core.getInput('circleci-token', {required: true})
+  );
+
+  const { 'workflow-id': workflowId } = JSON.parse(payload.check_run.external_id);
+  const url = `https://circleci.com/api/v2/workflow/${workflowId}/job`;
+
+  console.log('requesting', workflowId);
+  const resp = await fetch(url, {
+    headers: {
+      'authorization': `Bearer ${authToken}`,
+    }
+  });
+  console.log(resp);
+  console.log(await resp.json());
+
   // const user = core.getInput('user');
   // if (!user) {
   //   throw Error('configuration is missing input for: user');

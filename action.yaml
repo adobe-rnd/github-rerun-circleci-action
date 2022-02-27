@@ -1,12 +1,9 @@
 name: 'Rerun CircleCI'
 description: 'Reruns a failed CircleCi Job.'
-#inputs:
-#  user:
-#    description: 'user for which to impersonate'
-#    required: true
-#  repo-token:
-#    description: 'github token for creating commit'
-#    required: true
+inputs:
+  circleci-token:
+    description: 'circleci token for accessing the api'
+    required: true
 runs:
   using: 'node16'
   main: 'dist/index.js'

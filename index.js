@@ -11,17 +11,41 @@
  */
 const core = require('@actions/core');
 const github = require('@actions/github');
+const { fetch } = require('@adobe/helix-fetch');
 
 async function run() {
   console.log('----- 1 -------');
   console.log(process.env.GITHUB_EVENT_NAME);
   console.log(JSON.stringify(github.context, null, 2));
-  const { payload } = github.context;
+  const { payload, eventName } = github.context;
+  const action = payload.action;
+  if (action !== 'completed' || eventName !== 'check_run') {
+    core.warning(`Invalid configuration. This action should only be triggered on "check_run:completed" events (was ${eventName}:${action})`);
+    return;
+  }
+
   const conclusion = payload?.check_run?.conclusion;
   if (conclusion !== 'failure') {
     console.log(`ignoring check run with conclusion: ${conclusion}`);
     return;
   }
+
+  const authToken = new github.GitHub(
+    core.getInput('circleci-token', {required: true})
+  );
+
+  const { 'workflow-id': workflowId } = JSON.parse(payload.check_run.external_id);
+  const url = `https://circleci.com/api/v2/workflow/${workflowId}/job`;
+
+  console.log('requesting', workflowId);
+  const resp = await fetch(url, {
+    headers: {
+      'authorization': `Bearer ${authToken}`,
+    }
+  });
+  console.log(resp);
+  console.log(await resp.json());
+
   // const user = core.getInput('user');
   // if (!user) {
   //   throw Error('configuration is missing input for: user');
