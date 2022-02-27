@@ -70,7 +70,7 @@ async function run() {
     return;
   }
 
-  core.info(`circleci job ${item.name} has status ${item.status}. try to rerun.`);
+  core.info(`circleci job ${failed.name} has status ${failed.status}. try to rerun.`);
 
   url = `https://circleci.com/api/v2/workflow/${workflowId}/rerun`;
   console.log('POST', url);
