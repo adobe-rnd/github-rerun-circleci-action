@@ -1,37 +1,33 @@
-# Github Trigger CI Action
+# GitHub Rerun CircleCI Action
 
-This action creates a dummy, empty commit when a commit is pushed by
-another user. this can be used to trigger a CI workflow with a different user.
+This action reruns a circleci workflow if one of its steps has a status `unauthorized`.
+this is useful when renovate-bot runs the CI and doesn't have access to run the jobs.
 
 ## Inputs
 
-### `user`
+### `circleci-token`
 
-**Required** The username of the person to impersonate
-
-### `repo-token`
-
-**Required** A github token to issue the dummy commit.
+**Required** the CircleCI token to access its API
 
 ## Example usage
 
 ```
 on:
-  push:
+  check_run:
+    types: [ completed ]
     branches-ignore:
-      - 'master'
+      - 'main'
 
 jobs:
   ci_trigger:
     runs-on: ubuntu-latest
-    name: Impersonated CI Trigger
+    name: Rerun failed CircleCI
     steps:
-      - name: Trigger
-        id: trigger
-        uses: adobe-rnd/github-touch-action@master
+      - name: Run
+        id: run
+        uses: adobe-rnd/github-rerun-circleci-action@main
         with:
-          repo-token: ${{ secrets.MY_GITHUB_TOKEN }}
-          user: tripod-alt
+          circleci-token: ${{ secrets.CIRCLECI_TOKEN }}
 ```
 
 # Development

@@ -1,5 +1,5 @@
 name: 'Rerun CircleCI'
-description: 'Reruns a failed CircleCi Job.'
+description: 'Reruns a failed CircleCI Job.'
 inputs:
   circleci-token:
     description: 'circleci token for accessing the api'
