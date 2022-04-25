@@ -31036,8 +31036,8 @@ const github = __nccwpck_require__(5438);
 const { fetch } = __nccwpck_require__(8614);
 
 async function run() {
-  // console.log(JSON.stringify(github.context, null, 2));
   const { payload, eventName, actor } = github.context;
+  console.log(JSON.stringify(eventName, payload, null, 2));
   const action = payload.action;
   if (action !== 'completed' || eventName !== 'check_run') {
     core.warning(`Invalid configuration. This action should only be triggered on "check_run:completed" events (was ${eventName}:${action})`);
