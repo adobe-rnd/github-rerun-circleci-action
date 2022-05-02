@@ -15,7 +15,7 @@ const { fetch } = require('@adobe/helix-fetch');
 
 async function run() {
   const { payload, eventName, actor } = github.context;
-  console.log(JSON.stringify(eventName, payload, null, 2));
+  console.log(eventName, JSON.stringify(payload, null, 2));
   const action = payload.action;
   if (action !== 'completed' || eventName !== 'check_run') {
     core.warning(`Invalid configuration. This action should only be triggered on "check_run:completed" events (was ${eventName}:${action})`);
