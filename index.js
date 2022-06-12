@@ -18,8 +18,8 @@ async function run() {
   console.log(`Event name: ${eventName}`);
   console.log(JSON.stringify(payload, null, 2));
   const action = payload.action;
-  if (action !== 'completed' || eventName !== 'check_run') {
-    core.warning(`Invalid configuration. This action should only be triggered on "check_run:completed" events (was ${eventName}:${action})`);
+  if (action !== 'completed' || (eventName !== 'check_run' && eventName !== 'check_suite')) {
+    core.warning(`Invalid configuration. This action should only be triggered on "check_run:completed" or "check_suite:completed" events (was ${eventName}:${action})`);
     return;
   }
 
