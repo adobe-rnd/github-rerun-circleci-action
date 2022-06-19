@@ -37,13 +37,16 @@ async function run() {
   let { check_run } = payload;
   if (eventName === 'check_suite') {
     // find relevant check run
-    const { id } = payload.check_suite;
-
     const client = new github.GitHub(
       core.getInput('repo-token', {required: true})
     );
+    const { id } = payload.check_suite;
+    const owner = payload.repository.owner.name;
+    const repo = payload.repository.name;
     const ret = await client.checks.listForSuite({
       check_suite_id: id,
+      owner,
+      repo,
     })
     console.log(ret);
   }

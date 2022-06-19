@@ -4,6 +4,9 @@ inputs:
   circleci-token:
     description: 'circleci token for accessing the api'
     required: true
+  repo-token:
+    description: 'repository token for accessing the api'
+    required: true
 runs:
   using: 'node16'
   main: 'dist/index.js'
