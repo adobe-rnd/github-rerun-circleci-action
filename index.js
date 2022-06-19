@@ -23,10 +23,10 @@ async function run() {
     return;
   }
 
-  // if (actor !== 'renovate[bot]') { // todo: to be configured
-  //   console.log(`ignoring check run with actor: ${actor}`);
-  //   return;
-  // }
+  if (actor !== 'renovate[bot]') { // todo: to be configured
+    core.info(`ignoring check run with actor: ${actor}`);
+    return;
+  }
 
   const name = payload.check_run?.app.name || payload.check_suite?.app.name;
   if (name !== 'CircleCI Checks') {
@@ -48,10 +48,9 @@ async function run() {
       owner,
       repo,
     });
-    console.log(JSON.stringify(ret, null, 2));
+    // console.log(JSON.stringify(ret, null, 2));
     const check_runs = ret.data.check_runs;
     check_run = check_runs.find(({ status, conclusion }) => status === 'completed' && conclusion === 'failure');
-    console.log(check_runs);
     if (!check_run) {
       core.info('no failed check_run found check_suite');
       return;
