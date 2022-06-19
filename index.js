@@ -43,11 +43,13 @@ async function run() {
     const { id } = payload.check_suite;
     const owner = payload.repository.owner.login;
     const repo = payload.repository.name;
-    const { data: check_runs } = await client.checks.listForSuite({
+    const ret = await client.checks.listForSuite({
       check_suite_id: id,
       owner,
       repo,
     });
+    console.log(JSON.stringify(ret, null, 2));
+    const check_runs = ret.data.check_runs;
     check_run = check_runs.find(({ status, conclusion }) => status === 'completed' && conclusion === 'failure');
     console.log(check_runs);
     if (!check_run) {
