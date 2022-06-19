@@ -15,7 +15,7 @@ const { fetch } = require('@adobe/helix-fetch');
 
 async function run() {
   const { payload, eventName, actor } = github.context;
-  console.log(`Event name: ${eventName}`);
+  console.log(`[3] Event name: ${eventName}`);
   console.log(JSON.stringify(payload, null, 2));
   const action = payload.action;
   if (action !== 'completed' || (eventName !== 'check_run' && eventName !== 'check_suite')) {
