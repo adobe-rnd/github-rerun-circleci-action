@@ -23,26 +23,46 @@ async function run() {
     return;
   }
 
-  const conclusion = payload?.check_run?.conclusion;
-  if (conclusion !== 'failure') {
-    console.log(`ignoring check run with conclusion: ${conclusion}`);
-    return;
-  }
-
   if (actor !== 'renovate[bot]') { // todo: to be configured
     console.log(`ignoring check run with actor: ${actor}`);
     return;
   }
 
-  const details_url = payload.check_run.details_url || '';
-  if (!details_url.startsWith('https://circleci.com/workflow-run/')) {
-    console.log(`ignoring non circleci check run: ${details_url}`);
+  const name = payload.check_run?.app.name || payload.check_suite?.app.name;
+  if (name !== 'CircleCI Checks') {
+    console.log(`ignoring non circleci check: ${name}`);
     return;
   }
 
+  let { check_run } = payload;
+  if (eventName === 'check_suite') {
+    // find relevant check run
+    const { id } = payload.check_suite;
+
+    const client = new github.GitHub(
+      core.getInput('repo-token', {required: true})
+    );
+    const ret = await client.checks.listForSuite({
+      check_suite_id: id,
+    })
+    console.log(ret);
+  }
+
+  if (!check_run) {
+    console.log('relevant check_run not found');
+    return;
+  }
+
+  const { conclusion } = check_run;
+  if (conclusion !== 'failure') {
+    console.log(`ignoring check run with conclusion: ${conclusion}`);
+    return;
+  }
+
+
   const circleToken =  core.getInput('circleci-token', {required: true});
 
-  const { 'workflow-id': workflowId } = JSON.parse(payload.check_run.external_id);
+  const { 'workflow-id': workflowId } = JSON.parse(check_run.external_id);
 
   if (!workflowId) {
     core.warning(`Invalid event. check_run does not include information about workflow-id`);
