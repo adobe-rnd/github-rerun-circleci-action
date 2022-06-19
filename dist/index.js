@@ -31063,7 +31063,7 @@ async function run() {
       core.getInput('repo-token', {required: true})
     );
     const { id } = payload.check_suite;
-    const owner = payload.repository.owner.name;
+    const owner = payload.repository.owner.login;
     const repo = payload.repository.name;
     const ret = await client.checks.listForSuite({
       check_suite_id: id,
