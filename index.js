@@ -47,21 +47,20 @@ async function run() {
       check_suite_id: id,
       owner,
       repo,
-    })
+    });
+    check_run = check_runs.find(({ status, conclusion }) => status === 'completed' && conclusion === 'failure');
     console.log(check_runs);
+    if (!check_run) {
+      core.info('no failed check_run found check_suite');
+      return;
+    }
+  } else {
+    const { conclusion } = check_run;
+    if (conclusion !== 'failure') {
+      core.info(`ignoring check run with conclusion: ${conclusion}`);
+      return;
+    }
   }
-
-  if (!check_run) {
-    core.warning('relevant check_run not found');
-    return;
-  }
-
-  const { conclusion } = check_run;
-  if (conclusion !== 'failure') {
-    core.info(`ignoring check run with conclusion: ${conclusion}`);
-    return;
-  }
-
 
   const circleToken =  core.getInput('circleci-token', {required: true});
 
