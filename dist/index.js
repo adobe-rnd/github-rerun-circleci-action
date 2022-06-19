@@ -31052,7 +31052,7 @@ async function run() {
 
   const name = payload.check_run?.app.name || payload.check_suite?.app.name;
   if (name !== 'CircleCI Checks') {
-    console.log(`ignoring non circleci check: ${name}`);
+    core.info(`ignoring non circleci check: ${name}`);
     return;
   }
 
@@ -31065,22 +31065,22 @@ async function run() {
     const { id } = payload.check_suite;
     const owner = payload.repository.owner.login;
     const repo = payload.repository.name;
-    const ret = await client.checks.listForSuite({
+    const { data: check_runs } = await client.checks.listForSuite({
       check_suite_id: id,
       owner,
       repo,
     })
-    console.log(ret);
+    console.log(check_runs);
   }
 
   if (!check_run) {
-    console.log('relevant check_run not found');
+    core.warning('relevant check_run not found');
     return;
   }
 
   const { conclusion } = check_run;
   if (conclusion !== 'failure') {
-    console.log(`ignoring check run with conclusion: ${conclusion}`);
+    core.info(`ignoring check run with conclusion: ${conclusion}`);
     return;
   }
 
