@@ -31045,10 +31045,10 @@ async function run() {
     return;
   }
 
-  if (actor !== 'renovate[bot]') { // todo: to be configured
-    console.log(`ignoring check run with actor: ${actor}`);
-    return;
-  }
+  // if (actor !== 'renovate[bot]') { // todo: to be configured
+  //   console.log(`ignoring check run with actor: ${actor}`);
+  //   return;
+  // }
 
   const name = payload.check_run?.app.name || payload.check_suite?.app.name;
   if (name !== 'CircleCI Checks') {
