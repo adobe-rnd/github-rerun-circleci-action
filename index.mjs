@@ -9,9 +9,9 @@
  * OF ANY KIND, either express or implied. See the License for the specific language
  * governing permissions and limitations under the License.
  */
-const core = require('@actions/core');
-const github = require('@actions/github');
-const { context } = require('@adobe/helix-fetch');
+import core from '@actions/core';
+import github from '@actions/github';
+import { context } from '@adobe/helix-fetch';
 
 async function run(fetch) {
   const { payload, eventName, actor } = github.context;
@@ -119,11 +119,10 @@ async function run(fetch) {
 
 const fetchContext = context();
 try {
-  await run();
-  run(fetchContext.fetch);
+  await run(fetchContext.fetch);
 } catch (e) {
-  console.error(error);
-  core.setFailed(error.message);
+  console.error(e);
+  core.setFailed(e.message);
 } finally {
   await fetchContext.reset();
 }
