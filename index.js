@@ -15,7 +15,7 @@ const { fetch } = require('@adobe/helix-fetch');
 
 async function run() {
   const { payload, eventName, actor } = github.context;
-  console.log(`[4] Event name: ${eventName}`);
+  // console.log(`[4] Event name: ${eventName}`);
   // console.log(JSON.stringify(payload, null, 2));
   const action = payload.action;
   if (action !== 'completed' || (eventName !== 'check_run' && eventName !== 'check_suite')) {
@@ -26,9 +26,9 @@ async function run() {
     .split(',')
     .map((s) => s.trim());
 
-  core.info(`validation if actor is valid user: ${users}`);
-  if (users.includes(actor)) {
-    core.info(`ignoring check run with actor: ${actor}`);
+  core.info(`validation if actor '${actor}' is valid user: ${users}`);
+  if (!users.includes(actor)) {
+    core.info('ignoring non valid actor');
     return;
   }
 
