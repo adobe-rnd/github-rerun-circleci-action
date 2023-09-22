@@ -6,7 +6,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "ncc build index.js",
+    "build": "ncc build index.mjs",
     "release": "npm version patch && git push --follow-tags"
   },
   "repository": {

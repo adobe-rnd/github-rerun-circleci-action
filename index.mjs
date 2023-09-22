@@ -11,9 +11,9 @@
  */
 const core = require('@actions/core');
 const github = require('@actions/github');
-const { fetch } = require('@adobe/helix-fetch');
+const { context } = require('@adobe/helix-fetch');
 
-async function run() {
+async function run(fetch) {
   const { payload, eventName, actor } = github.context;
   // console.log(`[4] Event name: ${eventName}`);
   // console.log(JSON.stringify(payload, null, 2));
@@ -115,11 +115,17 @@ async function run() {
   }
   body = await resp.json();
   console.log(body);
-
 }
 
-run().catch((error) => {
+const fetchContext = context();
+try {
+  await run();
+  run(fetchContext.fetch);
+} catch (e) {
   console.error(error);
   core.setFailed(error.message);
-});
+} finally {
+  await fetchContext.reset();
+}
+
 
