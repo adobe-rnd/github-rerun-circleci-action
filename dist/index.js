@@ -31037,15 +31037,19 @@ const { fetch } = __nccwpck_require__(8614);
 
 async function run() {
   const { payload, eventName, actor } = github.context;
-  console.log(`[3] Event name: ${eventName}`);
-  console.log(JSON.stringify(payload, null, 2));
+  console.log(`[4] Event name: ${eventName}`);
+  // console.log(JSON.stringify(payload, null, 2));
   const action = payload.action;
   if (action !== 'completed' || (eventName !== 'check_run' && eventName !== 'check_suite')) {
     core.warning(`Invalid configuration. This action should only be triggered on "check_run:completed" or "check_suite:completed" events (was ${eventName}:${action})`);
     return;
   }
+  const users = (core.getInput('users') || 'renovate[bot]')
+    .split(',')
+    .map((s) => s.trim());
 
-  if (actor !== 'renovate[bot]') { // todo: to be configured
+  core.info(`validation if actor is valid user: ${users}`);
+  if (users.includes(actor)) {
     core.info(`ignoring check run with actor: ${actor}`);
     return;
   }
@@ -31094,7 +31098,7 @@ async function run() {
     return;
   }
 
-  let url = `https://circleci.com/api/v2/workflow/${workflowId}/job`;
+  let url = `https://circleci.com/api/v2/workflow/${workflowId}`;
   console.log('GET', url);
   let resp = await fetch(url, {
     headers: {
@@ -31102,7 +31106,7 @@ async function run() {
     }
   });
   if (!resp.ok) {
-    core.warning(`Unable to fetch workflow job: ${resp.status} ${await resp.text()}`);
+    core.warning(`Unable to fetch workflow: ${resp.status} ${await resp.text()}`);
     return;
   }
 
@@ -31110,13 +31114,11 @@ async function run() {
   console.log(body);
 
   // check if any of the status is `unauthorized`
-  const failed = body.items.find((item) => item.status === 'unauthorized');
-  if (!failed) {
-    core.info('non of the circleci jobs failed due to unauthorized status. ignoring.');
+  if (body.status !== 'unauthorized') {
+    core.info(`workflow status is: ${body.status}. ignoring.`);
     return;
   }
-
-  core.info(`circleci job '${failed.name}' has status '${failed.status}'. try to rerun.`);
+  core.info('workflow was unauthorized. try to rerun.');
 
   url = `https://circleci.com/api/v2/workflow/${workflowId}/rerun`;
   console.log('POST', url);

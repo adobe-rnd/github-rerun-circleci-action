@@ -7,6 +7,9 @@ inputs:
   repo-token:
     description: 'repository token for accessing the api'
     required: true
+  users:
+    description: 'coma separated list of users for which the workflow should run'
+    required: false
 runs:
   using: 'node16'
   main: 'dist/index.js'
