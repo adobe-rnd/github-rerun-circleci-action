@@ -22,7 +22,7 @@
   "homepage": "https://github.com/adobe-rnd/github-rerun-circleci-action",
   "dependencies": {
     "@actions/core": "^1.2.6",
-    "@actions/github": "^2.1.1",
+    "@actions/github": "^6.0.0",
     "@adobe/helix-fetch": "^3.0.5"
   },
   "devDependencies": {
